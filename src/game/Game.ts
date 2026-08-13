@@ -1447,4 +1447,35 @@ export class Game {
       })
     }
   }
+
+  private updateGrabPrompts() {
+    const px = this.player.torso.position.x
+    const py = this.player.torso.position.y
+    const pz = this.player.torso.position.z
+    const pf = this.player.facing
+    const grabReach = GRAB.reach * this.player.mods.scale
+
+    for (const enemy of this.dummies) {
+      if (this.player.grabbedTarget === enemy || this.player.climbing) {
+        enemy.setInGrabRange(false)
+        continue
+      }
+      const ex = enemy.torso.position.x
+      const ey = enemy.torso.position.y
+      const ez = enemy.torso.position.z
+      const dx = ex - px
+      const dy = ey - py
+      const dz = ez - pz
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz)
+      const dot = (dx * pf.x + dz * pf.z) / (Math.hypot(dx, dz) || 1)
+
+      const inRange =
+        !this.player.respawning &&
+        this.player.grabbedTarget === null &&
+        dist <= grabReach &&
+        dot >= GRAB.angleCos
+
+      enemy.setInGrabRange(inRange)
+    }
+  }
 }
