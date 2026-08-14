@@ -19,6 +19,9 @@ export class NetClient {
   clockSkew = 0
   offer: string[] | null = null
   lastWinner: string | null = null
+  matchTarget = 3
+  matchWinner: string | null = null
+  matchStandings: { id: string; wins: number; kos: number; dealt: number }[] = []
   status: 'idle' | 'connecting' | 'online' | 'reconnecting' | 'error' = 'idle'
   lastError = ''
 
@@ -110,6 +113,7 @@ export class NetClient {
     this.phase = msg.phase
     this.players.clear()
     for (const p of msg.players) this.players.set(p.id, p)
+    this.matchTarget = msg.matchTarget || 3
     this.status = 'online'
     this.reconnects = 0
     this.session = { room: msg.room, id: msg.id, name, secret: msg.secret }

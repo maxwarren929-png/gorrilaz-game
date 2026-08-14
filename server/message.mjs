@@ -134,7 +134,7 @@ export function sanitizeMessage(raw, prevPose = null) {
   const type = raw.type
   switch (type) {
     case 'create':
-      return { type: 'create', name: name0(raw.name) }
+      return { type: 'create', name: name0(raw.name), matchTarget: clampNum(Number(raw.matchTarget), 1, 10) || 3 }
     case 'join':
       return { type: 'join', room: roomCode(raw.room), name: name0(raw.name) }
     case 'rejoin': {

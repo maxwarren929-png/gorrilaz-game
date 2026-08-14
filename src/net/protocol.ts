@@ -59,7 +59,7 @@ export type HitKind = 'punch' | 'slam' | 'throw' | 'banana' | 'laser'
 
 export type C2S =
   | { type: 'join'; room: string; name: string }
-  | { type: 'create'; name: string }
+  | { type: 'create'; name: string; matchTarget?: number }
   | { type: 'rejoin'; room: string; name: string; id: string; secret: string }
   | PoseMsg
   | { type: 'punch'; target: string; dir: [number, number, number] }
@@ -77,7 +77,7 @@ export type C2S =
   | { type: 'trigger'; kind: 'domain' }
 
 export type S2C =
-  | { type: 'welcome'; id: string; room: string; players: PlayerInfo[]; phase: RoundPhase; secret: string }
+  | { type: 'welcome'; id: string; room: string; players: PlayerInfo[]; phase: RoundPhase; secret: string; matchTarget: number }
   | { type: 'joined'; player: PlayerInfo }
   | { type: 'left'; id: string }
   | { type: 'error'; message: string }
@@ -94,6 +94,7 @@ export type S2C =
   | { type: 'ready'; id: string; value: boolean }
   | { type: 'phase'; phase: RoundPhase; endsAt: number; now: number }
   | { type: 'roundEnd'; winner: string | null; standings: { id: string; hp: number; dealt: number }[] }
+  | { type: 'matchEnd'; winner: string | null; standings: { id: string; wins: number; kos: number; dealt: number }[] }
   | { type: 'offer'; options: string[] } // only sent to a losing player
   | { type: 'granted'; id: string; upgrade: string; upgrades: string[] }
   | { type: 'reset' } // cross-instance sync only; not handled by the client

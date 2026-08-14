@@ -167,6 +167,33 @@ export function createEngine(store, { instanceId }) {
     else if (alive.length > 1) winner = alive.slice().sort((a, b) => b.hp - a.hp || b.dealt - a.dealt)[0]
     if (winner) winner.wins += 1
     room.winner = winner ? winner.id : null
+    const target = room.matchTarget || 3
+    // Check match victory: if a player has reached the target wins, end the
+    // match instead of continuing to the upgrade phase.
+    if (winner && winner.wins >= target) {
+      room.matchWinner = winner.id
+      emitAll(room, () => ({
+        type: 'matchEnd',
+        winner: winner.id,
+        standings: players.map((p) => ({ id: p.id, wins: p.wins, kos: p.kos, dealt: p.dealt })),
+      }))
+      setPhase(room, 'ended', ROUND.endScreenTime + 5)
+      // After the banner, reset all wins and collapse to lobby for a new match.
+      setTimeout(() => {
+        for (const p of room.players.values()) {
+          p.wins = 0
+          p.kos = 0
+          p.dealt = 0
+          p.upgrades = []
+          p.maxHp = MAX_HP
+          p.ko = false
+          p.ready = false
+        }
+        room.matchWinner = null
+        collapseToLobby(room)
+      }, (ROUND.endScreenTime + 5) * 1000)
+      return
+    }
     emitAll(room, () => ({
       type: 'roundEnd',
       winner: room.winner,
@@ -176,6 +203,9 @@ export function createEngine(store, { instanceId }) {
   }
 
   function startUpgradePhase(room) {
+    // If a match just ended, don't start upgrades — the matchEnd timer will
+    // collapse to lobby.
+    if (room.matchWinner) return
     const players = [...room.players.values()].filter((p) => p.online)
     if (players.length === 0) return (room.phase = 'lobby')
     // Fewer than the minimum player count left → dissolve back to lobby
@@ -444,6 +474,8 @@ export function createEngine(store, { instanceId }) {
           koCounter: 0,
           pending: new Set(),
           idleSince: null,
+          matchTarget: Math.max(1, Math.min(10, msg.matchTarget || 3)),
+          matchWinner: null,
         }
         rooms.set(r.code, r)
       } else if (msg.type === 'rejoin') {
@@ -492,6 +524,7 @@ export function createEngine(store, { instanceId }) {
           players: [...r.players.values()].map(pub),
           phase: r.phase,
           secret: player.secret,
+          matchTarget: r.matchTarget || 3,
         })
         send(player, { type: 'phase', phase: r.phase, endsAt: r.endsAt, now: Date.now() })
         if (player.offer) send(player, { type: 'offer', options: player.offer })
@@ -516,6 +549,7 @@ export function createEngine(store, { instanceId }) {
         players: [...r.players.values()].map(pub),
         phase: r.phase,
         secret: player.secret,
+        matchTarget: r.matchTarget || 3,
       })
       send(player, { type: 'phase', phase: r.phase, endsAt: r.endsAt, now: Date.now() })
       emitAll(r, () => ({ type: 'joined', player: pub(player) }), player.id)
