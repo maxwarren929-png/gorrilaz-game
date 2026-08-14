@@ -123,8 +123,9 @@ export function resolveWsUrl(): string {
       /* fall through to defaults */
     }
   }
-  // 2. Served over TLS from a real domain → the co-deployed Vercel function.
-  if (location.protocol === 'https:') return `wss://${location.host}/api/ws`
+  // 2. HTTPS production (Fly.io / any hosting) — WebSocket on same origin.
+  //    Fly terminates TLS at the edge and forwards to the container.
+  if (location.protocol === 'https:') return `wss://${location.host}`
   // 3. file:// or plain local → standalone dev server.
   if (!location.hostname || location.protocol === 'file:') return NET.defaultWs
   // 4. Dev / LAN (vite --host): same host, dev-server port.

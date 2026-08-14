@@ -1,0 +1,25 @@
+# Fly.io config for Jungle Brawl
+# https://fly.io/docs/reference/configuration/
+
+app = "jungle-brawl"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 250
+    soft_limit = 200
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
