@@ -675,7 +675,8 @@ export class Game {
       0.8
     )
     const dmg = (kind === 'banana' ? DAMAGE.banana : DAMAGE.laser) * this.domainBuff()
-    this.effects.damageNumber(dummy.torso.position.clone().setY(dummy.torso.position.y + 0.8), dmg)
+    const dp = dummy.torso.position
+    this.effects.damageNumber(new THREE.Vector3(dp.x, dp.y + 0.8, dp.z), dmg)
   }
 
   private fireDomain() {
