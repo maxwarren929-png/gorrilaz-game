@@ -33,6 +33,7 @@ export const FLAG = {
   grabbed: 4,
   respawning: 8,
   ko: 16,
+  flying: 32,
 }
 
 export type RoundPhase = 'lobby' | 'countdown' | 'active' | 'ended' | 'upgrading'
@@ -50,6 +51,8 @@ export interface PlayerInfo {
   dealt: number
   upgrades: string[]
   online?: boolean
+  /** Wall-clock ms (server-aligned) when an active Domain Expansion buff ends. */
+  domainUntil?: number
 }
 
 export type HitKind = 'punch' | 'slam' | 'throw' | 'banana' | 'laser'
@@ -57,7 +60,7 @@ export type HitKind = 'punch' | 'slam' | 'throw' | 'banana' | 'laser'
 export type C2S =
   | { type: 'join'; room: string; name: string }
   | { type: 'create'; name: string }
-  | { type: 'rejoin'; room: string; name: string; id: string }
+  | { type: 'rejoin'; room: string; name: string; id: string; secret: string }
   | PoseMsg
   | { type: 'punch'; target: string; dir: [number, number, number] }
   | { type: 'grab'; target: string }
@@ -74,7 +77,7 @@ export type C2S =
   | { type: 'trigger'; kind: 'domain' }
 
 export type S2C =
-  | { type: 'welcome'; id: string; room: string; players: PlayerInfo[]; phase: RoundPhase }
+  | { type: 'welcome'; id: string; room: string; players: PlayerInfo[]; phase: RoundPhase; secret: string }
   | { type: 'joined'; player: PlayerInfo }
   | { type: 'left'; id: string }
   | { type: 'error'; message: string }
@@ -93,6 +96,7 @@ export type S2C =
   | { type: 'roundEnd'; winner: string | null; standings: { id: string; hp: number; dealt: number }[] }
   | { type: 'offer'; options: string[] } // only sent to a losing player
   | { type: 'granted'; id: string; upgrade: string; upgrades: string[] }
+  | { type: 'reset' } // cross-instance sync only; not handled by the client
 
 export const TINTS = [
   0x3b3b41, 0x5b4636, 0x46464c, 0x6a5a36, 0x3d4a38, 0x4a3a4c, 0x5a4030, 0x2f3f4a,
@@ -105,10 +109,19 @@ export function themeFromTint(tint: number) {
 }
 
 export function resolveWsUrl(): string {
-  // 1. Explicit override wins: ?ws=… or localStorage gffa-ws.
+  // 1. Explicit override wins: ?ws=… or localStorage gffa-ws. Validate the
+  //    scheme so a mistyped `ws:/attacker.com` or javascript: URL can't be
+  //    injected here (the value is later fed straight to `new WebSocket`).
   const q = new URLSearchParams(window.location.search)
   const forced = q.get('ws') || localStorage.getItem('gffa-ws')
-  if (forced) return forced
+  if (forced) {
+    try {
+      const u = new URL(forced, window.location.href)
+      if (u.protocol === 'ws:' || u.protocol === 'wss:') return u.href
+    } catch {
+      /* fall through to defaults */
+    }
+  }
   // 2. Served over TLS from a real domain → the co-deployed Vercel function.
   if (location.protocol === 'https:') return `wss://${location.host}/api/ws`
   // 3. file:// or plain local → standalone dev server.

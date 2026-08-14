@@ -16,6 +16,8 @@ interface Ring {
   life: number
   maxLife: number
   maxScale: number
+  /** Initial opacity — fade is computed from this so first-frame opacity matches creation. */
+  opacity0: number
 }
 
 interface DomainFX {
@@ -26,6 +28,8 @@ interface DomainFX {
   domeMat: THREE.MeshBasicMaterial
   bananas: THREE.Object3D[]
   mats: THREE.Material[]
+  /** Per-domain inline geometries (dome + plant trunks/leaves) — disposed on despawn. */
+  geometries: THREE.BufferGeometry[]
   life: number
   maxLife: number
   /** Visual radius (shell). The physics shell is the same so the inside is
@@ -99,7 +103,7 @@ export class Effects {
     ring.rotation.x = -Math.PI / 2
     ring.position.set(pos.x, 0.06, pos.z)
     this.scene.add(ring)
-    this.rings.push({ mesh: ring, life: 0, maxLife: 0.35, maxScale: 5 })
+    this.rings.push({ mesh: ring, life: 0, maxLife: 0.35, maxScale: 5, opacity0: 0.9 })
   }
 
   slam(pos: THREE.Vector3) {
@@ -152,7 +156,7 @@ export class Effects {
     ring1.rotation.x = -Math.PI / 2
     ring1.position.set(pos.x, 0.08, pos.z)
     this.scene.add(ring1)
-    this.rings.push({ mesh: ring1, life: 0, maxLife: 0.45, maxScale: 8 })
+    this.rings.push({ mesh: ring1, life: 0, maxLife: 0.45, maxScale: 8, opacity0: 0.95 })
 
     const ringMat2 = new THREE.MeshBasicMaterial({
       color: 0xffcc00,
@@ -164,7 +168,7 @@ export class Effects {
     ring2.rotation.x = -Math.PI / 2
     ring2.position.set(pos.x, 0.12, pos.z)
     this.scene.add(ring2)
-    this.rings.push({ mesh: ring2, life: 0, maxLife: 0.35, maxScale: 11 })
+    this.rings.push({ mesh: ring2, life: 0, maxLife: 0.35, maxScale: 11, opacity0: 0.8 })
   }
 
   throw(pos: THREE.Vector3, dir: THREE.Vector3) {
@@ -211,7 +215,7 @@ export class Effects {
     ring.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir.clone().normalize())
     ring.position.copy(pos)
     this.scene.add(ring)
-    this.rings.push({ mesh: ring, life: 0, maxLife: 0.4, maxScale: 7 })
+    this.rings.push({ mesh: ring, life: 0, maxLife: 0.4, maxScale: 7, opacity0: 0.9 })
   }
 
   grab(pos: THREE.Vector3) {
@@ -225,7 +229,7 @@ export class Effects {
     ring.rotation.x = -Math.PI / 2
     ring.position.set(pos.x, Math.max(0.1, pos.y), pos.z)
     this.scene.add(ring)
-    this.rings.push({ mesh: ring, life: 0, maxLife: 0.28, maxScale: 4 })
+    this.rings.push({ mesh: ring, life: 0, maxLife: 0.28, maxScale: 4, opacity0: 0.95 })
   }
 
   escape(pos: THREE.Vector3) {
@@ -282,7 +286,7 @@ export class Effects {
       r.life += dt
       const t = r.life / r.maxLife
       r.mesh.scale.setScalar(1 + t * r.maxScale)
-      ;(r.mesh.material as THREE.MeshBasicMaterial).opacity = Math.max(0, 0.95 * (1 - t))
+      ;(r.mesh.material as THREE.MeshBasicMaterial).opacity = Math.max(0, r.opacity0 * (1 - t))
       if (r.life >= r.maxLife) {
         this.scene.remove(r.mesh)
         ;(r.mesh.material as THREE.Material).dispose()
@@ -299,6 +303,7 @@ export class Effects {
         this.scene.remove(d.group)
         if (d.body) d.world.removeBody(d.body)
         for (const m of d.mats) m.dispose()
+        for (const g of d.geometries) g.dispose()
         this.domains.splice(i, 1)
       }
     }
@@ -313,6 +318,7 @@ export class Effects {
     const group = new THREE.Group()
     group.position.copy(pos)
     const mats: THREE.Material[] = []
+    const geometries: THREE.BufferGeometry[] = []
 
     // Fully opaque black shell with a subtle inner rim for depth.
     const wallMat = new THREE.MeshBasicMaterial({
@@ -320,7 +326,9 @@ export class Effects {
       side: THREE.BackSide,
     })
     mats.push(wallMat)
-    const dome = new THREE.Mesh(new THREE.SphereGeometry(radius, 48, 24), wallMat)
+    const domeGeo = new THREE.SphereGeometry(radius, 48, 24)
+    geometries.push(domeGeo)
+    const dome = new THREE.Mesh(domeGeo, wallMat)
     dome.renderOrder = 5
     group.add(dome)
 
@@ -361,16 +369,21 @@ export class Effects {
     }
     scatter(18)
 
-    // Mini banana plants inside the domain.
+    // Mini banana plants inside the domain. Trunk + leaf geometries are
+    // per-domain inline allocations — track them for cleanup.
     for (let i = 0; i < 3; i++) {
       const ang = (i / 3) * Math.PI * 2
       const r = radius * 0.55
       const plant = new THREE.Group()
       plant.position.set(Math.cos(ang) * r, 0, Math.sin(ang) * r)
-      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.16, 1.6, 6), trunkMat)
+      const trunkGeo = new THREE.CylinderGeometry(0.1, 0.16, 1.6, 6)
+      geometries.push(trunkGeo)
+      const trunk = new THREE.Mesh(trunkGeo, trunkMat)
       trunk.position.y = 0.8
       plant.add(trunk)
-      const leaf = new THREE.Mesh(new THREE.ConeGeometry(0.9, 1.6, 6), trunkMat)
+      const leafGeo = new THREE.ConeGeometry(0.9, 1.6, 6)
+      geometries.push(leafGeo)
+      const leaf = new THREE.Mesh(leafGeo, trunkMat)
       leaf.position.y = 1.6
       plant.add(leaf)
       for (let k = 0; k < 4; k++) {
@@ -392,6 +405,7 @@ export class Effects {
       domeMat: wallMat, // aliased; kept for type compatibility
       bananas,
       mats,
+      geometries,
       life: DOMAIN.duration,
       maxLife: DOMAIN.duration,
       radius,
@@ -400,6 +414,11 @@ export class Effects {
       world,
       mat,
     })
+  }
+
+  /** Nearest active Domain Expansion shell position+radius for projectile blocking. */
+  domainWalls(): { pos: THREE.Vector3; radius: number }[] {
+    return this.domains.map((d) => ({ pos: d.group.position, radius: d.radius }))
   }
 
   dispose() {
@@ -415,6 +434,7 @@ export class Effects {
       this.scene.remove(d.group)
       if (d.body) d.world.removeBody(d.body)
       for (const m of d.mats) m.dispose()
+      for (const g of d.geometries) g.dispose()
     }
     this.particles = []
     this.rings = []

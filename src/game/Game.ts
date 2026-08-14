@@ -29,7 +29,7 @@ import {
   modsFor,
   UPGRADE_BY_ID,
 } from './constants'
-import { buildArena, CLIMB_ZONES, groundHeightAt, raycastArena, type ClimbZone, type TreeApis } from './Arena'
+import { buildArena, CLIMB_ZONES, groundHeightAt, raycastArena, type ClimbZone } from './Arena'
 import { Gorilla, GorillaTheme } from './Gorilla'
 import { CameraRig } from './CameraRig'
 import { Effects } from './Effects'
@@ -102,7 +102,6 @@ export class Game {
   private heldRemote: RemoteAvatar | null = null
   private heldById: string | null = null
   private poseAcc = 0
-  private netClock = 0
   // ---- Phase 5 ----
   private projectiles!: Projectiles
   private treeApis: ReturnType<typeof buildArena> | null = null
@@ -192,6 +191,74 @@ export class Game {
     this.loop()
   }
 
+  private onResize = () => {
+    const w = this.container.clientWidth
+    const h = this.container.clientHeight
+    if (w === 0 || h === 0) return
+    this.renderer.setSize(w, h)
+    this.cameraRig.resize(w / h)
+  }
+
+  /**
+   * Tear down everything the constructor allocated: RAF loop, DOM/Window
+   * listeners, the Input set, the WebGLRenderer, the Effects/Projectiles
+   * pools, every Gorilla's bodies+constraints+materials, every RemoteAvatar,
+   * and all net callbacks. After this the instance is inert and safe to GC.
+   */
+  dispose() {
+    if (!this.running) return
+    this.running = false
+    cancelAnimationFrame(this.raf)
+
+    window.removeEventListener('resize', this.onResize)
+
+    // Detach net callbacks first so a late message can't touch a disposed Game.
+    const net = this.net
+    if (net) {
+      net.onWelcome = undefined
+      net.onJoined = undefined
+      net.onLeft = undefined
+      net.onPose = undefined
+      net.onPunched = undefined
+      net.onGrabbed = undefined
+      net.onReleased = undefined
+      net.onSlammed = undefined
+      net.onThrown = undefined
+      net.onRanged = undefined
+      net.onTriggered = undefined
+      net.onKo = undefined
+      net.onPhase = undefined
+      net.onGranted = undefined
+    }
+
+    this.input.dispose()
+    this.effects.dispose()
+    this.projectiles.dispose()
+    for (const av of this.remotes.values()) {
+      this.scene.remove(av.group)
+      av.dispose()
+    }
+    this.remotes.clear()
+    for (const g of this.gorillas) {
+      this.scene.remove(g.group)
+      g.dispose()
+    }
+    this.gorillas = []
+    this.dummies = []
+    this.heldRemote = null
+    this.heldById = null
+    this.grabConstraint = null
+
+    this.scene.remove(this.highlight)
+    ;(this.highlight.geometry as THREE.BufferGeometry).dispose()
+    ;(this.highlight.material as THREE.Material).dispose()
+
+    // Release the renderer + its DOM element from the container.
+    const canvas = this.renderer.domElement
+    if (canvas.parentElement === this.container) this.container.removeChild(canvas)
+    this.renderer.dispose()
+  }
+
   private spawnGorillas() {
     const dummyCount = this.online ? 0 : 3
     const total = 1 + dummyCount
@@ -222,9 +289,14 @@ export class Game {
   private bindNet() {
     const net = this.net
     if (!net) return
-    // Session resume (NetClient reconnect) re-fires onWelcome with the full
-    // roster: rebuild all remote avatars so stale doppelgangers never linger.
+    // Seed round-liveness from the phase the welcome already established —
+    // onPhase only fires on transitions, so without this a client that joins
+    // mid-lobby thinks the round is live and starts sending falldmg/void/fire.
+    this.roundLive = net.phase === 'active'
     net.onWelcome = () => {
+      // Session resume (NetClient reconnect) re-fires onWelcome with the full
+      // roster: rebuild all remote avatars so stale doppelgangers never linger,
+      // and flush snapshot buffers so pre-disconnect poses don't bleed in.
       for (const av of this.remotes.values()) {
         this.scene.remove(av.group)
         av.dispose()
@@ -248,15 +320,21 @@ export class Game {
     net.onPose = (msg) => this.remotes.get(msg.id)?.push(msg)
     net.onPunched = (_from, to, dir) => {
       const d = new CANNON.Vec3(dir[0], dir[1], dir[2])
-      // Knockback scales with the ATTACKER's upgrades (Feather Fists, Big/Tiny).
       const atk = net.players.get(_from)
       const am = atk ? modsFor(atk.upgrades) : null
-      const mul = am ? am.forceMul * am.punchKnockMul : 1
+      const atkDomain = atk && atk.domainUntil && atk.domainUntil > Date.now() + this.net!.clockSkew ? DOMAIN.buffKnock : 1
+      const vicDomain = this.domainActive ? DOMAIN.buffResist : 1
+      const mul = (am ? am.forceMul * am.punchKnockMul : 1) * atkDomain * vicDomain
       if (to === net.id) this.player.takeHit(d, mul)
       const who = this.remotes.get(to)
       const pos = who ? who.pos : this.player.torso.position
       this.effects.burst(new THREE.Vector3(pos.x, pos.y + 0.5, pos.z), new THREE.Vector3(d.x, 0.4, d.z))
       this.cameraRig.addShake(to === net.id ? 0.55 : 0.28)
+      // Visual knockback prediction on remote avatars
+      if (who) {
+        const f3 = new THREE.Vector3(d.x, 0, d.z).normalize()
+        who.applyHitImpulse(f3, PUNCH.knockback * mul)
+      }
     }
     net.onGrabbed = (from, to) => {
       if (to === net.id) {
@@ -287,26 +365,43 @@ export class Game {
     }
     net.onSlammed = (from, to, dir) => {
       const d = new CANNON.Vec3(dir[0], dir[1], dir[2])
-      const sm = modsFor(net.players.get(from)?.upgrades || [])
+      const atk = net.players.get(from)
+      const sm = modsFor(atk?.upgrades || [])
+      const atkDomain = atk && atk.domainUntil && atk.domainUntil > Date.now() + this.net!.clockSkew ? DOMAIN.buffKnock : 1
+      const vicDomain = this.domainActive ? DOMAIN.buffResist : 1
+      const mul = sm.forceMul * atkDomain * vicDomain
       if (to === net.id)
-        this.player.applyLaunch(d, GRAB.slamForce * sm.forceMul, 0.2, 32, GRAB.limbFlail, GRAB.slamStaggerTime)
-      const pos = this.remotes.get(to)?.pos || this.player.torso.position
+        this.player.applyLaunch(d, GRAB.slamForce * mul, 0.2, 32, GRAB.limbFlail, GRAB.slamStaggerTime)
+      const victim = this.remotes.get(to)
+      const pos = victim?.pos || this.player.torso.position
       this.effects.slam(new THREE.Vector3(pos.x, pos.y, pos.z))
       this.cameraRig.addShake(0.7)
+      if (victim) {
+        const f3 = new THREE.Vector3(d.x, d.y, d.z)
+        if (f3.lengthSq() > 1e-4) f3.normalize()
+        victim.applyHitImpulse(f3, GRAB.slamForce * mul)
+      }
       if (from === net.id) this.slams++
     }
     net.onThrown = (from, to, dir, charge) => {
       const d = new CANNON.Vec3(dir[0], dir[1], dir[2])
-      const tm = modsFor(net.players.get(from)?.upgrades || [])
-      const force = (THROW.minForce + (THROW.maxForce - THROW.minForce) * charge) * tm.forceMul
-      // Keep vertical launch unscaled by the attacker's forceMul so a giant
-      // throw goes far/flat instead of up; applyLaunch does y = force * up.
-      const up = THROW.up / Math.max(1e-4, tm.forceMul)
+      const atk = net.players.get(from)
+      const tm = modsFor(atk?.upgrades || [])
+      const atkDomain = atk && atk.domainUntil && atk.domainUntil > Date.now() + this.net!.clockSkew ? DOMAIN.buffKnock : 1
+      const vicDomain = this.domainActive ? DOMAIN.buffResist : 1
+      const force = (THROW.minForce + (THROW.maxForce - THROW.minForce) * charge) * tm.forceMul * atkDomain * vicDomain
+      const up = THROW.up
       const spin = THROW.minSpin + (THROW.maxSpin - THROW.minSpin) * charge
       if (to === net.id) this.player.applyLaunch(d, force, up, spin, THROW.limbFlail, 1.5)
-      const pos = this.remotes.get(to)?.pos || this.player.torso.position
+      const victim = this.remotes.get(to)
+      const pos = victim?.pos || this.player.torso.position
       this.effects.throw(new THREE.Vector3(pos.x, pos.y, pos.z), new THREE.Vector3(d.x, d.y, d.z))
       this.cameraRig.addShake(0.55 + charge * 0.4)
+      if (victim) {
+        const f3 = new THREE.Vector3(d.x, d.y, d.z)
+        if (f3.lengthSq() > 1e-4) f3.normalize()
+        victim.applyHitImpulse(f3, force)
+      }
       if (from === net.id) this.throws++
     }
 
@@ -442,7 +537,12 @@ export class Game {
     const ang = (Math.max(0, idx) / n) * Math.PI * 2
     const r = ARENA.half * 0.6
     this.player.revive(new CANNON.Vec3(Math.cos(ang) * r, RESPAWN.spawnY + 0.5, Math.sin(ang) * r))
-    for (const av of this.remotes.values()) av.ko = false
+    // Flush remote snapshot buffers so the previous round's final pose can't
+    // bleed into the new round's first interpolation window.
+    for (const av of this.remotes.values()) {
+      av.ko = false
+      av.clearSnaps()
+    }
     this.releaseGrab()
     this.bananaCd = 0
     this.laserCd = 0
@@ -521,10 +621,25 @@ export class Game {
       this.player.torso.position.z
     )
     const wallDist = raycastArena(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z, LASER.range)
-    const hit = this.projectiles.raycast(origin, dir, this.rangedTargets(), wallDist)
+    // Active Domain Expansion shells also clip the beam — they're solid
+    // physics bodies for gorillas but the laser raycast ignored them.
+    let domainClip = wallDist
+    for (const w of this.effects.domainWalls()) {
+      const cx = w.pos.x - origin.x
+      const cy = w.pos.y - origin.y
+      const cz = w.pos.z - origin.z
+      const along = cx * dir.x + cy * dir.y + cz * dir.z
+      if (along < 0) continue
+      const perp2 = cx * cx + cy * cy + cz * cz - along * along
+      if (perp2 > w.radius * w.radius) continue
+      const back = Math.sqrt(Math.max(0, w.radius * w.radius - perp2))
+      const t = along - back
+      if (t > 0.05 && t < domainClip) domainClip = t
+    }
+    const hit = this.projectiles.raycast(origin, dir, this.rangedTargets(), domainClip)
     const length = hit
       ? origin.distanceTo(hit.pos)
-      : wallDist
+      : domainClip
     this.projectiles.fireBeam(origin, dir, Math.max(0.4, length), this.player.mods.laser_v2)
     this.cameraRig.addShake(hit ? 0.28 : 0.16)
     if (hit?.id.startsWith('dummy:')) this.hitDummyRanged(hit.id, dir, 'laser')
@@ -666,7 +781,7 @@ export class Game {
     const myScale = this.player.mods.scale
     const punchReach = (PUNCH.hitRadius + PUNCH.bodyPad) * myScale
     for (const enemy of this.dummies) {
-      if (enemy.respawning || this.player.hitSet.has(enemy)) continue
+      if (enemy.respawning || enemy.ko || this.player.hitSet.has(enemy)) continue
       const ex = enemy.torso.position.x
       const ey = enemy.torso.position.y
       const ez = enemy.torso.position.z
@@ -693,7 +808,7 @@ export class Game {
     if (this.online && this.net) {
       for (const [id, av] of this.remotes) {
         if (this.player.hitSet.has(av as unknown as Gorilla)) continue
-        if (av.flags & FLAG.respawning) continue
+        if (av.ko || av.flags & FLAG.respawning) continue
         const dx = av.pos.x - this.player.torso.position.x
         const dz = av.pos.z - this.player.torso.position.z
         const victimR = GORILLA.torsoRadius * av.scale
@@ -792,8 +907,11 @@ export class Game {
     bestTarget.grabbedBy = this.player
     bestTarget.isGrabbed = true
     bestTarget.grabTimer = 0
-      const hold = GRAB.holdDistance * Math.sqrt(this.player.mods.scale)
-      this.grabConstraint = new CANNON.PointToPointConstraint(
+    // Hold distance scales with the *sum* of torso radii so a Big Gorilla
+    // (scale 3) grabs cleanly without the constraint fighting sphere
+    // collision. sqrt-scale placed the held body inside the colliders.
+    const hold = GORILLA.torsoRadius * (this.player.mods.scale + bestTarget.mods.scale) + 0.2
+    this.grabConstraint = new CANNON.PointToPointConstraint(
       this.player.torso,
       new CANNON.Vec3(0, 0, -hold),
       bestTarget.torso,
@@ -835,6 +953,12 @@ export class Game {
     this.player.grabCooldown = GRAB.cooldown
     this.chargingThrow = false
     this.throwCharge = 0
+    // Also clear the victim-side bookkeeping: if the local player was the one
+    // being held (e.g. a KO cleared the grab mid-hold), don't leave heldById
+    // pointing at a possibly-leaving holder.
+    this.heldById = null
+    this.player.isGrabbed = false
+    this.player.holdPoint = null
     if (this.heldRemote) {
       this.heldRemote.heldLock = false
       this.heldRemote = null
@@ -1124,6 +1248,9 @@ export class Game {
     if (!this.running) return
     this.raf = requestAnimationFrame(this.loop)
     let dt = this.clock.getDelta()
+    // Capture the raw frame delta before clamping so the HUD FPS counter
+    // reflects real hitches (otherwise it never drops below 20 = 1/0.05).
+    const rawDt = dt
     if (dt > 0.05) dt = 0.05
 
     // Drop a grab the instant either body is falling into the void, BEFORE
@@ -1331,7 +1458,6 @@ export class Game {
 
     // Visuals sync
     for (const g of this.gorillas) g.sync()
-    this.netClock += dt
     if (this.online) {
       if (this.heldById) {
         const holder = this.remotes.get(this.heldById)
@@ -1353,22 +1479,26 @@ export class Game {
           GRAB.holdDistance
         )
       }
+      // Shared wall-clock (Date.now() + clockSkew) so peers that booted at
+      // different times see the same interpolation window.
+      const now = this.net ? this.net.netClock() : Date.now()
       for (const [id, av] of this.remotes) {
         const info = this.net?.players.get(id)
         if (info) {
           av.setHealth(info.hp, info.maxHp)
           av.ko = info.ko
+          av.domainUntil = info.domainUntil || 0
           if (info.upgrades.length !== av.upgrades.length) av.setUpgrades(info.upgrades)
         }
-        av.sample(this.netClock, this.cameraRig.camera)
+        av.sample(now, this.cameraRig.camera)
       }
-      const me = this.net?.players.get(this.net.id)
+      const me = this.net?.id ? this.net.players.get(this.net.id) : null
       if (me) {
         this.localHp = me.hp
         if (me.ko && !this.player.ko) this.player.knockOut()
       }
       this.poseAcc += dt
-      if (this.poseAcc >= 1 / NET.poseHz) {
+      if (this.poseAcc >= 1 / NET.poseHz && this.net && this.net.id) {
         this.poseAcc = 0
         const flags =
           (this.player.climbing ? FLAG.climbing : 0) |
@@ -1377,25 +1507,25 @@ export class Game {
           (this.player.respawning ? FLAG.respawning : 0) |
           (this.player.ko ? FLAG.ko : 0) |
           (this.player.flying ? FLAG.flying : 0)
-        const pose = this.player.snapshot(this.netClock, flags)
+        const pose = this.player.snapshot(now, flags)
         pose.id = this.net.id
         this.net.send(pose)
       }
     }
 
     // Projectiles
-    this.bananaCd = Math.max(0, this.bananaCd - dt)
-    this.laserCd = Math.max(0, this.laserCd - dt)
-    this.domainCd = Math.max(0, this.domainCd - dt)
-    this.domainTimer = Math.max(0, this.domainTimer - dt)
-    this.domainActive = this.domainTimer > 0
     this.effects.update(dt)
-    this.projectiles.update(dt, this.rangedTargets(), (id, at, dir, key) => {
-      this.effects.burst(at, new THREE.Vector3(dir.x, 0.4, dir.z))
-      this.cameraRig.addShake(0.25)
-      if (id.startsWith('dummy:')) this.hitDummyRanged(id, dir, 'banana')
-      else if (key) this.net?.send({ type: 'ranged', kind: 'banana', impact: key, target: id })
-    })
+    this.projectiles.update(
+      dt,
+      this.rangedTargets(),
+      (id, at, dir, key) => {
+        this.effects.burst(at, new THREE.Vector3(dir.x, 0.4, dir.z))
+        this.cameraRig.addShake(0.25)
+        if (id.startsWith('dummy:')) this.hitDummyRanged(id, dir, 'banana')
+        else if (key) this.net?.send({ type: 'ranged', kind: 'banana', impact: key, target: id })
+      },
+      this.effects.domainWalls()
+    )
 
     // Camera
     const ep = this.player.effectivePosition()
@@ -1434,7 +1564,7 @@ export class Game {
         charge: this.chargingThrow ? this.throwCharge : 0,
         climbing: this.player.climbing,
         climbReady,
-        fps: Math.round(1 / Math.max(dt, 1e-4)),
+        fps: Math.round(1 / Math.max(rawDt, 1e-4)),
         room: this.net?.room || '',
         peers: this.remotes.size + (this.online ? 1 : 0),
         hp: this.localHp,
@@ -1442,6 +1572,7 @@ export class Game {
         ko: this.player.ko,
         flying: this.player.flying,
         flightLeft: this.player.flightTimer,
+        flightRecharge: this.player.flightCooldown,
         practicePicker: this.practicePicker,
         practiceUpgrades: this.practiceUpgrades,
       })

@@ -110,6 +110,9 @@ export default function App() {
     } catch (e) {
       setErr(e instanceof Error ? e.message : 'Failed to connect')
       net.disconnect()
+      // Drop the dead NetClient ref so a subsequent startSolo doesn't try to
+      // disconnect() an already-disconnected stale instance.
+      if (netRef.current === net) netRef.current = null
     } finally {
       setBusy('')
     }

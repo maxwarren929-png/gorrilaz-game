@@ -143,9 +143,11 @@ export class Gorilla {
   private bananaGun = new THREE.Group()
   private meshLinks: { mesh: THREE.Object3D; body: CANNON.Body; baseScale: THREE.Vector3 }[] = []
   private materials: THREE.Material[] = []
+  private geometries: THREE.BufferGeometry[] = []
   private collisionGroup: number
   private collisionMask: number
   private material: CANNON.Material
+  private world!: CANNON.World
 
   constructor(
     world: CANNON.World,
@@ -160,6 +162,7 @@ export class Gorilla {
     this.isPlayer = isPlayer
     this.spawn = spawn.clone()
     this.material = material
+    this.world = world
 
     // Per-instance collision group: own parts never collide with each other
     // (kills self-jitter), but do collide with the ground and every other gorilla.
@@ -282,20 +285,20 @@ export class Gorilla {
 
     // Visible Banana Gun. It replaces the punch when equipped and is mounted
     // on the torso so it follows every ragdoll rotation and size upgrade.
-    const gunBody = new THREE.Mesh(
-      new THREE.BoxGeometry(0.34, 0.28, 0.62),
-      new THREE.MeshStandardMaterial({ color: 0x3f3428, roughness: 0.7, flatShading: true })
-    )
-    const barrel = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.1, 0.14, 0.6, 7),
-      new THREE.MeshStandardMaterial({ color: 0x1d2025, roughness: 0.42, flatShading: true })
-    )
+    const gunBodyMat = this.mkMat(0x3f3428)
+    const barrelMat = this.mkMat(0x1d2025)
+    const magazineMat = this.mkMat(0xffd52e)
+    magazineMat.emissive = new THREE.Color(0x604500)
+    magazineMat.roughness = 0.5
+    const gunBodyGeo = new THREE.BoxGeometry(0.34, 0.28, 0.62)
+    const barrelGeo = new THREE.CylinderGeometry(0.1, 0.14, 0.6, 7)
+    const magazineGeo = new THREE.CylinderGeometry(0.2, 0.2, 0.2, 8)
+    this.geometries.push(gunBodyGeo, barrelGeo, magazineGeo)
+    const gunBody = new THREE.Mesh(gunBodyGeo, gunBodyMat)
+    const barrel = new THREE.Mesh(barrelGeo, barrelMat)
     barrel.rotation.x = Math.PI / 2
     barrel.position.z = -0.5
-    const magazine = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.2, 0.2, 0.2, 8),
-      new THREE.MeshStandardMaterial({ color: 0xffd52e, emissive: 0x604500, roughness: 0.5, flatShading: true })
-    )
+    const magazine = new THREE.Mesh(magazineGeo, magazineMat)
     magazine.rotation.z = Math.PI / 2
     magazine.position.y = -0.13
     this.bananaGun.add(gunBody, barrel, magazine)
@@ -575,13 +578,18 @@ export class Gorilla {
       } else if (y > this.apexY) {
         this.apexY = y
       }
-    } else if (this.airborne) {
+    } else if (grounded && this.airborne) {
+      // Real landing: bill the fall only when actually touching ground.
       this.airborne = false
       const drop = this.apexY - y
       const speed = Math.abs(this.torso.velocity.y)
       if (drop > 0.2 && speed > FALL.minTrackSpeed) this.pendingFall = { drop, speed }
       this.apexY = y
-    } else if (this.climbing || this.flying) {
+    } else {
+      // Transition into climb or flight mid-fall: silently reset the tracker
+      // so a gorilla who catches a wall or engages flight after >6m of drop
+      // isn't billed phantom fall damage they never actually landed.
+      this.airborne = false
       this.apexY = y
     }
   }
@@ -625,7 +633,10 @@ export class Gorilla {
       return
     }
     if (this.respawning || this.climbing || this.isGrabbed || !dir) return
-    if (dir.lengthSquared() > 1e-4) {
+    // Guard on the horizontal magnitude: dir.lengthSquared() includes y, but
+    // facing zeroes y before normalize — a purely-vertical input would
+    // produce a zero-length facing and NaN-everywhere downstream.
+    if (dir.x * dir.x + dir.z * dir.z > 1e-4) {
       this.facing.set(dir.x, 0, dir.z)
       this.facing.normalize()
       if (this.flying) return
@@ -636,7 +647,7 @@ export class Gorilla {
   }
 
   controlWander(dt: number) {
-    if (this.respawning || this.isGrabbed) return
+    if (this.ko || this.respawning || this.isGrabbed) return
     this.wanderTimer -= dt
     if (this.wanderTimer <= 0) {
       const a = Math.random() * Math.PI * 2
@@ -1049,7 +1060,9 @@ export class Gorilla {
   takeHit(dir: CANNON.Vec3, knockMul = 1) {
     const t = this.torso
     this.staggerTimer = UPRIGHT.staggerTime
-    this.laserInterrupt = 0.5 // any real hit breaks a held laser beam
+    // Max with the existing interrupt so a fresh hit can't shorten one already
+    // in flight (applyLaunch below uses Math.max(., 0.6) for the same reason).
+    this.laserInterrupt = Math.max(this.laserInterrupt, 0.5)
     const kb = PUNCH.knockback * knockMul
     // Heavy horizontal launch; the vertical component tapers off as knockMul
     // grows so Feather Fists sends the target across the arena instead of up.
@@ -1101,6 +1114,23 @@ export class Gorilla {
       this.climbing = false
       this.climbZone = null
       this.climbCooldown = 0
+      // Clear action/flight flags too so a freshly respawned body doesn't
+      // immediately re-enter the flight branch or drive its arms into a
+      // forward-clasp pose from a stale grab-reach timer.
+      this.flying = false
+      this.flyRise = false
+      this.flySink = false
+      this.flightRiseArmed = true
+      this.grabReachTimer = 0
+      this.staggerTimer = 0
+      this.punchCooldown = 0
+      this.grabCooldown = 0
+      this.laserInterrupt = 0
+      this.hitSet.clear()
+      // Fall-damage tracker must not carry a pre-fall apex into the next life.
+      this.airborne = false
+      this.apexY = this.torso.position.y
+      this.pendingFall = null
       for (const b of this.allBodies) {
         b.velocity.set(0, 0, 0)
         b.angularVelocity.set(0, 0, 0)
@@ -1148,6 +1178,22 @@ export class Gorilla {
   }
 
   dispose() {
+    // Tear down physics: remove constraints then bodies from the world so the
+    // simulation stops touching this gorilla after the Game is destroyed.
+    for (const c of this.constraints) {
+      try {
+        this.world.removeConstraint(c)
+      } catch {}
+    }
+    for (const b of this.allBodies) {
+      try {
+        this.world.removeBody(b)
+      } catch {}
+    }
+    // Release GPU resources. Materials are per-instance; geometries in GEO are
+    // shared across gorillas so they're not disposed here (only the per-
+    // instance banana-gun geometries in this.geometries).
     for (const m of this.materials) m.dispose()
+    for (const g of this.geometries) g.dispose()
   }
 }

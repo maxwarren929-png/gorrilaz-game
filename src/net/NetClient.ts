@@ -4,6 +4,7 @@ interface Session {
   room: string
   id: string
   name: string
+  secret: string
 }
 
 const SESSION_KEY = 'gffa-session'
@@ -45,10 +46,15 @@ export class NetClient {
 
   connect(kind: 'create' | 'join', name: string, room?: string): Promise<void> {
     this.disconnect(true)
+    // Reconnect is gated on `manuallyClosed`. The disconnect() above sets it;
+    // we must clear it again so a future dropped-socket reconnect can fire.
+    this.manuallyClosed = false
     this.status = 'connecting'
     this.onStatus?.()
     this.session = null
     return new Promise((resolve, reject) => {
+      let resolved = false
+      const onFail = () => reject(new Error(`Can't reach ${resolveWsUrl()}`))
       this.openSocket(
         { type: kind === 'create' ? 'create' : 'join', name: name || 'Ape', room: (room || '').toUpperCase() } as C2S,
         (ws) => {
@@ -63,6 +69,7 @@ export class NetClient {
               return
             }
             if (msg.type === 'welcome') {
+              resolved = true
               this.acceptWelcome(msg, name)
               resolve()
               return
@@ -70,13 +77,26 @@ export class NetClient {
             this.dispatch(msg)
           }
         },
-        () => reject(new Error(`Can't reach ${resolveWsUrl()}`))
+        () => {
+          if (resolved) return
+          onFail()
+        }
       )
     })
   }
 
   get me(): PlayerInfo | undefined {
     return this.players.get(this.id)
+  }
+
+  /**
+   * Server-aligned wall clock in ms. Poses are stamped with this on send and
+   * consumed on receive so interpolation lines up across clients regardless of
+   * each peer's local boot time. The skew is recomputed on every `phase`
+   * message (every few seconds during active play).
+   */
+  netClock(): number {
+    return Date.now() + this.clockSkew
   }
 
   phaseRemaining(): number {
@@ -92,7 +112,7 @@ export class NetClient {
     for (const p of msg.players) this.players.set(p.id, p)
     this.status = 'online'
     this.reconnects = 0
-    this.session = { room: msg.room, id: msg.id, name }
+    this.session = { room: msg.room, id: msg.id, name, secret: msg.secret }
     try {
       localStorage.setItem(SESSION_KEY, JSON.stringify(this.session))
     } catch {}
@@ -113,11 +133,11 @@ export class NetClient {
     }
     const delay = Math.min(4000, 400 * 2 ** this.reconnects)
     this.reconnects++
-    this.reconnectTimer = window.setTimeout(() => {
-      const s = this.session
-      if (!s) return
-      this.openSocket(
-        { type: 'rejoin', room: s.room, name: s.name, id: s.id },
+      this.reconnectTimer = window.setTimeout(() => {
+        const s = this.session
+        if (!s) return
+        this.openSocket(
+          { type: 'rejoin', room: s.room, name: s.name, id: s.id, secret: s.secret },
         (ws) => {
           ws.onmessage = (ev) => {
             const msg = safeParse(ev)
@@ -139,6 +159,7 @@ export class NetClient {
                 } catch {}
                 return
               }
+              this.detachSocket(ws)
               this.scheduleReconnect()
               return
             }
@@ -157,6 +178,18 @@ export class NetClient {
     }, delay)
   }
 
+  /** Tear down a single socket without disturbing the NetClient's bookkeeping. */
+  private detachSocket(ws: WebSocket) {
+    ws.onclose = null
+    ws.onerror = null
+    ws.onopen = null
+    ws.onmessage = null
+    try {
+      ws.close()
+    } catch {}
+    if (this.ws === ws) this.ws = null
+  }
+
   private openSocket(payload: C2S, onAttach: (ws: WebSocket) => void, onFail: () => void) {
     let settled = false
     const ws = new WebSocket(resolveWsUrl())
@@ -173,7 +206,14 @@ export class NetClient {
         onFail()
         return
       }
-      if (this.status === 'online') this.scheduleReconnect()
+      // Post-online drop → schedule a reconnect (gated by manuallyClosed).
+      if (this.status === 'online') {
+        this.scheduleReconnect()
+      } else if (this.status === 'connecting') {
+        // Socket closed post-handshake but pre-welcome: caller's promise would
+        // otherwise hang forever. Surface it as a failure so the UI can retry.
+        onFail()
+      }
     }
     ws.onopen = () => {
       settled = true
@@ -299,6 +339,9 @@ export class NetClient {
     if (this.reconnectTimer) window.clearTimeout(this.reconnectTimer)
     if (this.ws) {
       this.ws.onclose = null
+      this.ws.onerror = null
+      this.ws.onopen = null
+      this.ws.onmessage = null
       try {
         this.ws.close()
       } catch {}
@@ -310,7 +353,24 @@ export class NetClient {
     this.offer = null
     this.players.clear()
     this.outboxQueue = []
+    // Detach consumer callbacks so a stray status emit can't reach a disposed
+    // Game (the consumer should also null these, but this is defense in depth
+    // against use-after-free-style references).
     if (manual) {
+      this.onWelcome = undefined
+      this.onJoined = undefined
+      this.onLeft = undefined
+      this.onPose = undefined
+      this.onPunched = undefined
+      this.onGrabbed = undefined
+      this.onReleased = undefined
+      this.onSlammed = undefined
+      this.onThrown = undefined
+      this.onRanged = undefined
+      this.onTriggered = undefined
+      this.onKo = undefined
+      this.onPhase = undefined
+      this.onGranted = undefined
       this.session = null
       try {
         localStorage.removeItem(SESSION_KEY)

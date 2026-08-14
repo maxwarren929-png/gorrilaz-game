@@ -47,6 +47,8 @@ export class RemoteAvatar {
   /** Body scale from Big/Tiny Gorilla, mirrored from the owner's upgrades. */
   scale = 1
   upgrades: string[] = []
+  /** Wall-clock ms when an active Domain Expansion buff ends (mirrored from owner). */
+  domainUntil = 0
   private hp = HEALTH.max
   private maxHp = HEALTH.max
   private bananaGun = new THREE.Group()
@@ -55,6 +57,11 @@ export class RemoteAvatar {
   private parts: THREE.Object3D[] = []
   private snaps: Snap[] = []
   private struggle: THREE.Group
+  // Client-side knockback prediction: when we see a remote get hit, apply a
+  // visual velocity offset that decays over ~0.4 s. Without this, the avatar
+  // appears frozen until the victim's real pose updates arrive (~200 ms).
+  private hitVel = new THREE.Vector3()
+  private hitTime = 0
 
   constructor(id: string, name: string, tint: number) {
     this.id = id
@@ -136,8 +143,8 @@ export class RemoteAvatar {
 
   /** Server-authoritative health for the pip. */
   setHealth(hp: number, max = HEALTH.max) {
-    this.maxHp = max
-    this.hp = Math.max(0, Math.min(max, hp))
+    this.maxHp = Math.max(1, max)
+    this.hp = Math.max(0, Math.min(this.maxHp, hp))
     const f = this.hp / this.maxHp
     this.hpFill.scale.x = Math.max(0.001, f)
     this.hpFill.position.x = -(1.06 * (1 - f)) / 2
@@ -162,6 +169,10 @@ export class RemoteAvatar {
         q: new THREE.Quaternion(msg.l[o + 3], msg.l[o + 4], msg.l[o + 5], msg.l[o + 6]),
       })
     }
+    // Stale/out-of-order: a duplicate or retrograde t (possible after a
+    // reconnect burst) would corrupt the interpolation window. Drop it.
+    const last = this.snaps[this.snaps.length - 1]
+    if (last && msg.t < last.t) return
     this.snaps.push({
       t: msg.t,
       p: new THREE.Vector3(msg.p[0], msg.p[1], msg.p[2]),
@@ -171,6 +182,24 @@ export class RemoteAvatar {
       flags: msg.s,
     })
     if (this.snaps.length > 10) this.snaps.splice(0, this.snaps.length - 10)
+  }
+
+  /** Flush the snapshot buffer — used on round reset and reconnect so a
+   * stale pre-reset pose can't bleed into the next round's interpolation. */
+  clearSnaps() {
+    this.snaps.length = 0
+    this.hitVel.set(0, 0, 0)
+    this.hitTime = 0
+  }
+
+  /** Visual knockback prediction: apply an immediate velocity offset in the
+   * hit direction so the avatar reacts on the attacker's screen before the
+   * victim's real pose updates arrive over the network. */
+  applyHitImpulse(dir: THREE.Vector3, force: number) {
+    const scale = force / 86 // normalised to a baseline punch
+    this.hitVel.addScaledVector(dir, scale * 4)
+    this.hitVel.y += scale * 1.5 // pop up slightly
+    this.hitTime = performance.now() / 1000
   }
 
   /** Pin this avatar in front of a local grabber so the hold reads instantly. */
@@ -204,6 +233,21 @@ export class RemoteAvatar {
     const span = Math.max(1e-4, b.t - a.t)
     const u = Math.max(0, Math.min(1, (renderT - a.t) / span))
     this.pos.lerpVectors(a.p, b.p, u)
+    // Apply decaying visual knockback offset. Converges to zero as real
+    // snapshots catch up, so there's no permanent desync.
+    if (this.hitTime > 0) {
+      const nowSec = performance.now() / 1000
+      const elapsed = nowSec - this.hitTime
+      if (elapsed < 0.45) {
+        const dt = 1 / 60
+        this.hitVel.y -= 20 * dt // gravity on the offset
+        this.hitVel.multiplyScalar(0.94) // drag
+        this.pos.addScaledVector(this.hitVel, dt)
+      } else {
+        this.hitVel.set(0, 0, 0)
+        this.hitTime = 0
+      }
+    }
     this.parts[0].position.copy(this.pos)
     this.parts[0].quaternion.slerpQuaternions(a.q, b.q, u)
     for (let i = 0; i < 4; i++) {

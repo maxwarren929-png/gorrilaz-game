@@ -6,24 +6,29 @@
 // second Vercel instance serving other sockets of the room converges.
 
 import { sanitizeMessage, parseRaw, RateLimiter } from './message.mjs'
+import { randomUUID } from 'crypto'
 
 const MAX = 8
 const PUNCH_RANGE = 3.6
 const GRAB_RANGE = 3.4
+// Server-side ranged tolerance: at least the longest-range projectile's full
+// travel distance (banana speed*life ≈ 75) so legit long-range hits register.
 const RANGED_RANGE = 34
-const HIT_COOLDOWN = 280
-const BANANA_COOLDOWN = 380
+const BANANA_RANGE = 80
+const HIT_COOLDOWN = 480 // mirrors src/game/constants.ts PUNCH.cooldown
+const BANANA_COOLDOWN = 700 // mirrors BANANA.cooldown
 const LASER_COOLDOWN = 80
 const OFFLINE_GRACE_MS = 25_000
 const IDLE_ROOM_S = 45
 
 // Mirrors src/game/constants.ts — keep in sync on tuning changes.
 const MAX_HP = 100
+const FALL_MAX_DAMAGE = 60
 const DMG = { punch: 8, slam: 26, throwBase: 14, throwCharged: 16, banana: 14, laser: 12 }
 const ROUND = { duration: 150, countdown: 5, upgradeTime: 25, endScreenTime: 5, minPlayers: 2, idleLobbyLimit: 3.5 }
-const DOMAIN = { duration: 6000, buffDamage: 1.6, buffResist: 0.6 } // mirrors src/game/constants.ts
+const DOMAIN = { duration: 15_000, cooldown: 18_000, buffDamage: 1.6, buffResist: 0.6 } // mirrors src/game/constants.ts
 const SIZE_GROUP = { big_gorilla: 'size', tiny_gorilla: 'size', banana_gun: 'ranged', laser_eyes: 'ranged' }
-const ALL_UPGRADES = ['feather_fists', 'big_gorilla', 'tiny_gorilla', 'bouncy_boy', 'flight', 'banana_gun', 'laser_eyes']
+const ALL_UPGRADES = ['feather_fists', 'big_gorilla', 'tiny_gorilla', 'bouncy_boy', 'flight', 'banana_gun', 'laser_eyes', 'domain_expansion']
 const TINTS = [0x3b3b41, 0x5b4636, 0x46464c, 0x6a5a36, 0x3d4a38, 0x4a3a4c, 0x5a4030, 0x2f3f4a]
 const ABC = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
 
@@ -78,6 +83,9 @@ export function createEngine(store, { instanceId }) {
     dealt: p.dealt,
     upgrades: p.upgrades,
     online: p.online,
+    // Exposed so remote clients can fold DOMAIN.buffKnock/buffResist into
+    // their own knockback calc (only the owner simulates the actual launch).
+    domainUntil: p.domainUntil || 0,
   })
 
   function maxHp(p) {
@@ -127,6 +135,20 @@ export function createEngine(store, { instanceId }) {
     victim.hp = 0
     victim.koOrder = ++room.koCounter
     if (attacker && attacker !== victim) attacker.kos += 1
+    // A KO breaks any grab the victim is part of (as grabber or grabbed).
+    // Without this, a KO'd grabber server-side-pins the victim for the
+    // remainder of the round because nothing else clears room.grabs.
+    if (room.grabs.has(victim.id)) {
+      const to = room.grabs.get(victim.id)
+      room.grabs.delete(victim.id)
+      broadcast(room, { type: 'released', from: victim.id, to })
+    }
+    for (const [from, to] of [...room.grabs.entries()]) {
+      if (to === victim.id) {
+        room.grabs.delete(from)
+        broadcast(room, { type: 'released', from, to })
+      }
+    }
     emitAll(room, () => ({ type: 'ko', id: victim.id, by: attacker ? attacker.id : null }))
     checkRoundOver(room)
   }
@@ -156,6 +178,9 @@ export function createEngine(store, { instanceId }) {
   function startUpgradePhase(room) {
     const players = [...room.players.values()].filter((p) => p.online)
     if (players.length === 0) return (room.phase = 'lobby')
+    // Fewer than the minimum player count left → dissolve back to lobby
+    // instead of looping a single solo player through endless upgrade offers.
+    if (players.length < ROUND.minPlayers) return collapseToLobby(room)
     const ranked = players.slice().sort((a, b) => {
       if (a.ko !== b.ko) return a.ko ? -1 : 1
       if (a.ko && b.ko) return a.koOrder - b.koOrder
@@ -196,6 +221,10 @@ export function createEngine(store, { instanceId }) {
   function grantUpgrade(room, p, upgradeId) {
     if (!p.offer || !p.offer.includes(upgradeId)) return
     p.upgrades.push(upgradeId)
+    // Refresh the cached ceiling so subsequent health broadcasts and the
+    // shared-room snapshot agree with maxHp(p). Without this, a big_gorilla
+    // pick leaves p.maxHp at 100 while p.hp gets set to 300 next round.
+    p.maxHp = maxHp(p)
     p.offer = null
     room.pending?.delete(p.id)
     emitAll(room, () => ({ type: 'granted', id: p.id, upgrade: upgradeId, upgrades: p.upgrades }))
@@ -207,11 +236,14 @@ export function createEngine(store, { instanceId }) {
     room.koCounter = 0
     for (const p of room.players.values()) {
       p.hp = maxHp(p)
+      // Keep the cached field in sync; some reads (e.g. shared-room snapshot
+      // via the stale p.maxHp path) still consult it directly.
+      p.maxHp = maxHp(p)
       p.ko = false
       p.dealt = 0
       p.koOrder = 0
       p.offer = null
-      broadcast(room, { type: 'health', id: p.id, hp: p.hp, maxHp: p.maxHp, dealt: 0 })
+      broadcast(room, { type: 'health', id: p.id, hp: p.hp, maxHp: maxHp(p), dealt: 0 })
     }
     if (store.shared) void publish(room, { type: 'reset' })
     setPhase(room, 'countdown', ROUND.countdown)
@@ -249,6 +281,7 @@ export function createEngine(store, { instanceId }) {
         id: sp.id,
         name: sp.name || 'Ape',
         tint: sp.tint ?? TINTS[0],
+        room, // back-reference so markGone/finalizeLeave find the room after a rejoin
         ws: null,
         pose: null,
         lastHit: 0,
@@ -269,7 +302,8 @@ export function createEngine(store, { instanceId }) {
         offlineTimer: null,
         sendWs: null,
         domainUntil: sp.domainUntil || 0,
-        lastDomain: 0,
+        lastDomain: sp.lastDomain || 0,
+        secret: sp.secret || randomUUID(),
       })
     }
     rooms.set(code, room)
@@ -371,6 +405,9 @@ export function createEngine(store, { instanceId }) {
       sendWs: null,
       domainUntil: 0,
       lastDomain: 0,
+      // Per-session secret required on rejoin so an attacker can't claim an
+      // offline player's sequential id during the 25s grace window.
+      secret: randomUUID(),
     }
     limiters.set(p, new RateLimiter())
     return p
@@ -412,7 +449,18 @@ export function createEngine(store, { instanceId }) {
       } else if (msg.type === 'rejoin') {
         r = rooms.get(msg.room) || (await hydrateRoom(msg.room))
         const prev = r?.players.get(msg.id)
+        // prev.online acts as a mutex: flip it synchronously here (before any
+        // subsequent await) so a second concurrent rejoin for the same id
+        // sees the player as online and is rejected.
         if (!r || !prev || prev.online) {
+          return void send(player, { type: 'error', message: 'Session expired' })
+        }
+        prev.online = true
+        // Verify the per-session secret so an attacker can't claim an offline
+        // player's id during the 25s grace window. The client stored the
+        // secret alongside the session in localStorage.
+        if (!msg.secret || msg.secret !== prev.secret) {
+          prev.online = false
           return void send(player, { type: 'error', message: 'Session expired' })
         }
         // Session resume: carry identity + authoritative state onto the fresh
@@ -433,7 +481,8 @@ export function createEngine(store, { instanceId }) {
         player.pose = prev.pose
         player.domainUntil = prev.domainUntil
         player.lastDomain = prev.lastDomain || 0
-        player.room = prev.room
+        player.secret = prev.secret
+        player.room = r
         r.players.delete(prev.id)
         r.players.set(player.id, player)
         send(player, {
@@ -442,6 +491,7 @@ export function createEngine(store, { instanceId }) {
           room: r.code,
           players: [...r.players.values()].map(pub),
           phase: r.phase,
+          secret: player.secret,
         })
         send(player, { type: 'phase', phase: r.phase, endsAt: r.endsAt, now: Date.now() })
         if (player.offer) send(player, { type: 'offer', options: player.offer })
@@ -465,6 +515,7 @@ export function createEngine(store, { instanceId }) {
         room: r.code,
         players: [...r.players.values()].map(pub),
         phase: r.phase,
+        secret: player.secret,
       })
       send(player, { type: 'phase', phase: r.phase, endsAt: r.endsAt, now: Date.now() })
       emitAll(r, () => ({ type: 'joined', player: pub(player) }), player.id)
@@ -522,6 +573,10 @@ export function createEngine(store, { instanceId }) {
       }
       case 'slam':
       case 'throw': {
+        // Same authority guard every other combat verb enforces. Without it,
+        // a KO'd or out-of-round grabber could still slam, broadcasting the
+        // verb (and even applying damage if applyDamage's phase gate misses).
+        if (player.ko || room.phase !== 'active') return
         const toId = room.grabs.get(player.id)
         if (!toId) return
         room.grabs.delete(player.id)
@@ -548,7 +603,9 @@ export function createEngine(store, { instanceId }) {
           if (!exp || exp < now) return
           const t = room.players.get(msg.target)
           if (!t || t === player || t.ko) return
-          if (dist(player.pose, t.pose) > RANGED_RANGE + 6) return
+          // Bananas travel up to ~75 units client-side; the old tolerance
+          // (RANGED_RANGE+6=40) rejected legit long-range hits.
+          if (dist(player.pose, t.pose) > BANANA_RANGE) return
           emitAll(room, () => ({ type: 'ranged', kind: 'banana', from: player.id, dir: [0, 0, 0], hit: t.id }), player.id)
           applyDamage(room, t, DMG.banana * forceMul(player), player)
           return
@@ -578,7 +635,11 @@ export function createEngine(store, { instanceId }) {
         return
       }
       case 'falldmg':
-        applyDamage(room, player, msg.amount, null)
+        // Bouncy Boy clientside multiplies fall damage by 0; enforce the same
+        // serverside so a modified client can't bill itself fall damage to
+        // suicide-deny an attacker's KO credit.
+        if (player.upgrades.includes('bouncy_boy')) return
+        applyDamage(room, player, Math.min(msg.amount, FALL_MAX_DAMAGE), null)
         return
       case 'void':
         if (room.phase === 'active') knockOut(room, player, null)
@@ -588,7 +649,7 @@ export function createEngine(store, { instanceId }) {
         if (player.ko || room.phase !== 'active') return
         if (!player.upgrades.includes('domain_expansion')) return
         const now = Date.now()
-        if (now - (player.lastDomain || 0) < 9000) return // server-side cooldown
+        if (now - (player.lastDomain || 0) < DOMAIN.cooldown) return // server-side cooldown
         player.lastDomain = now
         player.domainUntil = now + DOMAIN.duration
         emitAll(room, () => ({ type: 'triggered', from: player.id, kind: 'domain' }))
@@ -604,8 +665,9 @@ export function createEngine(store, { instanceId }) {
     p.lastMsgAt = Date.now()
   }
 
-  function attach(ws) {
+  function attach(ws, ip) {
     const player = newPlayerSocket()
+    player.ip = ip || ''
     player.sendWs = (msg) => {
       if (ws.readyState === 1) ws.send(JSON.stringify(msg))
     }
@@ -628,7 +690,9 @@ export function createEngine(store, { instanceId }) {
         for (const ev of events) {
           if (ev.from === instanceId) continue
           applyShareEvent(room, ev.msg)
-          broadcast(room, ev.msg)
+          // `reset` is an internal cross-instance sync signal — it has no
+          // handler on the typed client and would just throw in dispatchers.
+          if (ev.msg && ev.msg.type !== 'reset') broadcast(room, ev.msg)
         }
       } catch {}
     }
@@ -638,8 +702,42 @@ export function createEngine(store, { instanceId }) {
     const shared = await store.loadRoom(room.code)
     if (!shared?.players) return
     for (const sp of shared.players) {
-      const p = room.players.get(sp.id)
-      if (!p) continue
+      let p = room.players.get(sp.id)
+      if (!p) {
+        // Player exists on another instance but not yet on this one. Insert
+        // a minimal placeholder so combat validation, distance checks and
+        // round-over detection work for remote players too.
+        p = {
+          id: sp.id,
+          name: sp.name || 'Ape',
+          tint: sp.tint ?? TINTS[0],
+          room,
+          ws: null,
+          pose: null,
+          lastHit: 0,
+          lastRanged: 0,
+          lastMsgAt: 0,
+          spawned: new Map(),
+          hp: sp.hp ?? MAX_HP,
+          maxHp: sp.maxHp ?? MAX_HP,
+          ko: !!sp.ko,
+          koOrder: sp.koOrder || 0,
+          ready: !!sp.ready,
+          wins: sp.wins || 0,
+          kos: sp.kos || 0,
+          dealt: sp.dealt || 0,
+          upgrades: Array.isArray(sp.upgrades) ? sp.upgrades : [],
+          offer: sp.offer ?? null,
+          online: false,
+          offlineTimer: null,
+          sendWs: null,
+          domainUntil: sp.domainUntil || 0,
+          lastDomain: sp.lastDomain || 0,
+          secret: sp.secret || null,
+          remotePlaceholder: true, // not owned by this instance
+        }
+        room.players.set(sp.id, p)
+      }
       p.hp = sp.hp
       p.maxHp = sp.maxHp
       p.ko = sp.ko
@@ -648,6 +746,10 @@ export function createEngine(store, { instanceId }) {
       p.wins = sp.wins
       p.kos = sp.kos
       p.dealt = sp.dealt
+      // Sync online flag so checkRoundOver / onlineCount / collapseToLobby
+      // agree across instances. We never flip our own locally-owned sockets
+      // to offline here — only remote placeholders track the shared value.
+      if (p.remotePlaceholder) p.online = !!sp.online
     }
     room.phase = shared.phase
     room.endsAt = shared.endsAt || room.endsAt

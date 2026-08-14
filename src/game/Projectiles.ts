@@ -25,6 +25,9 @@ interface Beam {
 const bananaGeo = new THREE.CapsuleGeometry(BANANA.radius * 0.55, BANANA.radius * 1.4, 4, 8)
 const beamGeo = new THREE.CylinderGeometry(1, 1, 1, 10, 1, true)
 const discGeo = new THREE.CircleGeometry(1, 16)
+// Shared across every laser impact so despawn doesn't have to track + dispose
+// a per-beam RingGeometry (the audit caught a slow GPU leak here).
+const ringGeo = new THREE.RingGeometry(0.18, 0.7, 18)
 
 /**
  * Banana projectiles + laser beams for the Phase 5 ranged upgrades.
@@ -105,7 +108,7 @@ export class Projectiles {
     group.add(impact)
 
     const ring = new THREE.Mesh(
-      new THREE.RingGeometry(0.18, 0.7, 18),
+      ringGeo,
       new THREE.MeshBasicMaterial({
         color: 0x990000,
         transparent: true,
@@ -128,7 +131,8 @@ export class Projectiles {
   update(
     dt: number,
     targets: HitTarget[],
-    onHit: (id: string, at: THREE.Vector3, dir: THREE.Vector3, key?: string) => void
+    onHit: (id: string, at: THREE.Vector3, dir: THREE.Vector3, key?: string) => void,
+    domainWalls: { pos: THREE.Vector3; radius: number }[] = []
   ) {
     for (let i = this.bananas.length - 1; i >= 0; i--) {
       const b = this.bananas[i]
@@ -139,6 +143,18 @@ export class Projectiles {
       b.mesh.rotation.z += dt * 9
 
       let consumed = b.life <= 0 || b.mesh.position.y < -12
+
+      // Domain Expansion shells are solid for projectiles — a banana that
+      // crosses into the dome is consumed at the wall.
+      if (!consumed) {
+        for (const w of domainWalls) {
+          if (b.mesh.position.distanceTo(w.pos) <= w.radius + BANANA.radius) {
+            consumed = true
+            this.onBananaImpact?.(b.mesh.position.x, b.mesh.position.z)
+            break
+          }
+        }
+      }
 
       if (!consumed && b.live) {
         for (const t of targets) {

@@ -19,6 +19,13 @@ const memoryImpl = {
   },
   async deleteRoom(code) {
     this._rooms?.delete(code)
+    this._inst?.delete(code)
+    this._obx?.delete(code)
+    if (this._cursor) {
+      for (const k of [...this._cursor.keys()]) {
+        if (k.startsWith(code + ':') || k === code) this._cursor.delete(k)
+      }
+    }
   },
   async joinInstance(code, iid) {
     this._inst = this._inst || new Map()
@@ -84,7 +91,9 @@ function publicRoom(room) {
       name: p.name,
       tint: p.tint,
       hp: p.hp,
-      maxHp: p.maxHp,
+      // Recompute from upgrades so big_gorilla persists the right ceiling
+      // even if the cached p.maxHp field was stale at grant time.
+      maxHp: p.upgrades.includes('big_gorilla') ? 300 : 100,
       ko: p.ko,
       koOrder: p.koOrder,
       ready: p.ready,
@@ -95,6 +104,10 @@ function publicRoom(room) {
       online: p.online,
       offer: p.offer,
       spawned: p.spawned,
+      // Domain buff window must survive cross-instance sync and rejoin.
+      domainUntil: p.domainUntil || 0,
+      lastDomain: p.lastDomain || 0,
+      secret: p.secret,
     })),
   }
 }

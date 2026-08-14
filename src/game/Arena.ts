@@ -568,8 +568,6 @@ export function buildArena(
     }
   }
 
-  return { damageTreeAt, regrowTrees }
-
   const addVine = (cx: number, cz: number, topY: number) => {
     const len = topY
     const vine = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.1, len, 6), vineMat)
@@ -673,4 +671,6 @@ export function buildArena(
     ig.scale.setScalar(0.8 + Math.random() * 1.3)
     scene.add(ig)
   }
+
+  return { damageTreeAt, regrowTrees }
 }

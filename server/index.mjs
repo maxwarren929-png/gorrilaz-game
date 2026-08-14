@@ -22,12 +22,15 @@ const app = createServer((_req, res) => {
   res.end('gorilla-ffa ws server')
 })
 
-const wss = new WebSocketServer({ server: app })
+const wss = new WebSocketServer({ server: app, maxPayload: 8192 })
 
 wss.on('connection', (ws, req) => {
-  // Basic origin hardening isn't needed for a friend game, but log the peer.
-  void req
-  engine.attach(ws)
+  // Forward client IP to the engine for logs/future rate-limiting.
+  const xff = req.headers['x-forwarded-for']
+  const ip = (typeof xff === 'string' ? xff : Array.isArray(xff) ? xff[0] : '')?.split(',')[0]?.trim() || req.socket.remoteAddress || ''
+  engine.attach(ws, ip)
+  ws.isAlive = true
+  ws.on('pong', () => (ws.isAlive = true))
 })
 
 // Keep connections honest: drop dead sockets so the engine's close handler
@@ -42,10 +45,6 @@ setInterval(() => {
     ws.ping()
   }
 }, 15_000)
-wss.on('connection', (ws) => {
-  ws.isAlive = true
-  ws.on('pong', () => (ws.isAlive = true))
-})
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`\nGorilla FFA room server (store: ${store.shared ? 'Upstash (shared)' : 'in-memory'})`)

@@ -4,7 +4,7 @@
   "outputDirectory": "dist",
   "functions": {
     "api/ws.ts": {
-      "maxDuration": 300
+      "maxDuration": 800
     }
   },
   "rewrites": [{ "source": "/((?!api/).*)", "destination": "/index.html" }]

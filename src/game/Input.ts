@@ -171,6 +171,16 @@ export class Input {
     this.sprintHeld = false
     this.punchHeld = false
     this.pointerDown = false
+    // Clear queued edge actions too — without this a player holding Q (charge
+    // throw) who alt-tabs misses the keyup and the charge sticks indefinitely.
+    this.jumpQueued = false
+    this.punchQueued = false
+    this.slamQueued = false
+    this.grabQueued = false
+    this.throwPressedQueued = false
+    this.throwReleasedQueued = false
+    this.triggerQueued = false
+    this.upgradeQueued = false
   }
 
   consumePunch(): boolean {
