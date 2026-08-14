@@ -369,6 +369,9 @@ export class Effects {
       }
     }
   }
+
+  /**
+   * Black opaque dome + small banana environment (Domain Expansion).
    * The wall is solid for projectiles (see Game.fireDomain for the body).
    */
   domain(pos: THREE.Vector3, v2: boolean, scene: THREE.Scene, world: CANNON.World, mat: CANNON.Material) {

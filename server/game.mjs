@@ -24,7 +24,7 @@ const IDLE_ROOM_S = 45
 // Mirrors src/game/constants.ts — keep in sync on tuning changes.
 const MAX_HP = 100
 const FALL_MAX_DAMAGE = 60
-const DMG = { punch: 8, slam: 26, throwBase: 14, throwCharged: 16, banana: 14, laser: 12 }
+const DMG = { punch: 8, slam: 26, throwBase: 14, throwCharged: 16, banana: 14, laser: 6 }
 const ROUND = { duration: 150, countdown: 5, upgradeTime: 25, endScreenTime: 5, minPlayers: 2, idleLobbyLimit: 3.5 }
 const DOMAIN = { duration: 15_000, cooldown: 18_000, buffDamage: 1.6, buffResist: 0.6 } // mirrors src/game/constants.ts
 const SIZE_GROUP = { big_gorilla: 'size', tiny_gorilla: 'size', banana_gun: 'ranged', laser_eyes: 'ranged' }

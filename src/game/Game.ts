@@ -677,6 +677,8 @@ export class Game {
     const dmg = (kind === 'banana' ? DAMAGE.banana : DAMAGE.laser) * this.domainBuff()
     this.effects.damageNumber(dummy.torso.position.clone().setY(dummy.torso.position.y + 0.8), dmg)
   }
+
+  private fireDomain() {
     this.domainCd = DOMAIN.cooldown
     this.domainTimer = DOMAIN.duration
     this.domainActive = true

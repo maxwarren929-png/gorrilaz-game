@@ -219,7 +219,7 @@ export const DAMAGE = {
   throwBase: 14,   // at zero charge
   throwCharged: 16, // added at full charge (=> 30 at max)
   banana: 14,
-  laser: 12,
+  laser: 6,
 }
 
 // Short hops are free; long drops hurt proportionally.
