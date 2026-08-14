@@ -46,6 +46,7 @@ export default function App() {
   const [secs, setSecs] = useState(0)
   const [myId, setMyId] = useState('')
   const [conn, setConn] = useState<NetClient['status']>('idle')
+  const [matchTarget, setMatchTarget] = useState(3)
 
   useEffect(() => {
     return () => {
@@ -72,6 +73,7 @@ export default function App() {
     setWinner(net.lastWinner)
     setMyId(net.id)
     setConn(net.status)
+    setMatchTarget(net.matchTarget)
   }
 
   const startSolo = () => {
@@ -95,7 +97,7 @@ export default function App() {
     netRef.current = net
     net.onStatus = syncNet
     try {
-      await net.connect(kind, name.trim() || 'Ape', roomIn)
+      await net.connect(kind, name.trim() || 'Ape', roomIn, kind === 'create' ? matchTarget : undefined)
       if (!containerRef.current) return
       gameRef.current?.dispose()
       const game = new Game(containerRef.current, { online: true, net })
@@ -132,6 +134,8 @@ export default function App() {
   const me = players.find((p) => p.id === myId)
   const online = players.length > 0
   const mode = stats.holding ? 'hold' : stats.climbing ? 'climb' : stats.climbReady ? 'ready' : 'idle'
+  const matchWinner = netRef.current?.matchWinner ?? null
+  const matchStandings = netRef.current?.matchStandings ?? []
 
   const toggleReady = () => {
     const net = netRef.current

@@ -47,7 +47,7 @@ export class NetClient {
   private manuallyClosed = false
   private outboxQueue: string[] = []
 
-  connect(kind: 'create' | 'join', name: string, room?: string): Promise<void> {
+  connect(kind: 'create' | 'join', name: string, room?: string, matchTarget?: number): Promise<void> {
     this.disconnect(true)
     // Reconnect is gated on `manuallyClosed`. The disconnect() above sets it;
     // we must clear it again so a future dropped-socket reconnect can fire.
@@ -58,8 +58,12 @@ export class NetClient {
     return new Promise((resolve, reject) => {
       let resolved = false
       const onFail = () => reject(new Error(`Can't reach ${resolveWsUrl()}`))
+      const initMsg: C2S =
+        kind === 'create'
+          ? { type: 'create', name: name || 'Ape', matchTarget }
+          : { type: 'join', name: name || 'Ape', room: (room || '').toUpperCase() }
       this.openSocket(
-        { type: kind === 'create' ? 'create' : 'join', name: name || 'Ape', room: (room || '').toUpperCase() } as C2S,
+        initMsg,
         (ws) => {
           ws.onmessage = (ev) => {
             const msg = safeParse(ev)
@@ -302,12 +306,28 @@ export class NetClient {
         break
       case 'roundEnd': {
         this.lastWinner = msg.winner
+        this.matchWinner = null
         const w = msg.winner ? this.players.get(msg.winner) : null
         if (w) w.wins += 1
         for (const s of msg.standings) {
           const p = this.players.get(s.id)
           if (p) {
             p.hp = s.hp
+            p.dealt = s.dealt
+          }
+        }
+        this.onStatus?.()
+        break
+      }
+      case 'matchEnd': {
+        this.matchWinner = msg.winner
+        this.matchStandings = msg.standings
+        // Reflect final wins in the local PlayerInfo mirror.
+        for (const s of msg.standings) {
+          const p = this.players.get(s.id)
+          if (p) {
+            p.wins = s.wins
+            p.kos = s.kos
             p.dealt = s.dealt
           }
         }
@@ -355,6 +375,8 @@ export class NetClient {
     this.id = ''
     this.room = ''
     this.offer = null
+    this.lastWinner = null
+    this.matchWinner = null
     this.players.clear()
     this.outboxQueue = []
     // Detach consumer callbacks so a stray status emit can't reach a disposed
