@@ -26,6 +26,7 @@ import {
   SPRINT,
   GORILLA,
   DOMAIN,
+  DAMAGE,
   modsFor,
   UPGRADE_BY_ID,
 } from './constants'
@@ -334,6 +335,7 @@ export class Game {
       if (who) {
         const f3 = new THREE.Vector3(d.x, 0, d.z).normalize()
         who.applyHitImpulse(f3, PUNCH.knockback * mul)
+        this.effects.damageNumber(who.pos.clone(), DAMAGE.punch)
       }
     }
     net.onGrabbed = (from, to) => {
@@ -380,6 +382,7 @@ export class Game {
         const f3 = new THREE.Vector3(d.x, d.y, d.z)
         if (f3.lengthSq() > 1e-4) f3.normalize()
         victim.applyHitImpulse(f3, GRAB.slamForce * mul)
+        this.effects.damageNumber(victim.pos.clone(), DAMAGE.slam, true)
       }
       if (from === net.id) this.slams++
     }
@@ -401,6 +404,7 @@ export class Game {
         const f3 = new THREE.Vector3(d.x, d.y, d.z)
         if (f3.lengthSq() > 1e-4) f3.normalize()
         victim.applyHitImpulse(f3, force)
+        this.effects.damageNumber(victim.pos.clone(), DAMAGE.throwBase + DAMAGE.throwCharged * charge, true)
       }
       if (from === net.id) this.throws++
     }
@@ -431,9 +435,13 @@ export class Game {
           this.player.applyLaunch(new CANNON.Vec3(d.x, 0, d.z), knock, up, 18, 10, 0.8)
           this.cameraRig.addShake(0.5)
         }
-        const vp = this.remotes.get(hit)?.pos
-        const at = vp ? vp.clone() : new THREE.Vector3().copy(this.player.torso.position as never)
+        const vp = this.remotes.get(hit)
+        const at = vp ? vp.pos.clone() : new THREE.Vector3().copy(this.player.torso.position as never)
         this.effects.burst(at.setY(at.y + 0.4), new THREE.Vector3(d.x, 0.4, d.z))
+        if (vp) {
+          vp.applyHitImpulse(d.clone().setY(0).normalize(), knock)
+          this.effects.damageNumber(vp.pos.clone(), kind === 'banana' ? DAMAGE.banana : DAMAGE.laser)
+        }
       }
     }
 
@@ -666,9 +674,9 @@ export class Game {
       10,
       0.8
     )
+    const dmg = (kind === 'banana' ? DAMAGE.banana : DAMAGE.laser) * this.domainBuff()
+    this.effects.damageNumber(dummy.torso.position.clone().setY(dummy.torso.position.y + 0.8), dmg)
   }
-
-  private fireDomain() {
     this.domainCd = DOMAIN.cooldown
     this.domainTimer = DOMAIN.duration
     this.domainActive = true
@@ -803,6 +811,7 @@ export class Game {
       this.hits++
       this.cameraRig.addShake(0.5)
       this.effects.burst(new THREE.Vector3(ex, ey + 0.5, ez), new THREE.Vector3(dir.x, 0.4, dir.z))
+      this.effects.damageNumber(new THREE.Vector3(ex, ey + 0.8, ez), DAMAGE.punch * this.domainBuff())
     }
 
     if (this.online && this.net) {

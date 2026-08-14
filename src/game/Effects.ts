@@ -42,17 +42,32 @@ interface DomainFX {
   mat: CANNON.Material
 }
 
+interface DmgNumber {
+  sprite: THREE.Sprite
+  vel: THREE.Vector3
+  life: number
+  maxLife: number
+}
+
 const shardGeo = new THREE.TetrahedronGeometry(0.14)
 const starGeo = new THREE.OctahedronGeometry(0.18)
 const ringGeo = new THREE.RingGeometry(0.2, 0.38, 24)
 // Crescent banana shape for the Domain Expansion environment.
 const bananaGeo = new THREE.TorusGeometry(0.5, 0.17, 8, 14, Math.PI * 1.4)
 
+const dmgCanvas = document.createElement('canvas')
+dmgCanvas.width = 128
+dmgCanvas.height = 64
+const dmgCtx = dmgCanvas.getContext('2d')!
+const dmgTex = new THREE.CanvasTexture(dmgCanvas)
+dmgTex.colorSpace = THREE.SRGBColorSpace
+
 export class Effects {
   private scene: THREE.Scene
   private particles: Particle[] = []
   private rings: Ring[] = []
   private domains: DomainFX[] = []
+  private dmgNumbers: DmgNumber[] = []
 
   constructor(scene: THREE.Scene) {
     this.scene = scene
@@ -263,6 +278,37 @@ export class Effects {
     }
   }
 
+  /** Floating damage number that pops above the victim and fades. */
+  damageNumber(pos: THREE.Vector3, amount: number, crit = false) {
+    const rounded = Math.round(amount)
+    if (rounded <= 0) return
+    const text = String(rounded)
+    // Redraw the shared canvas for this number (cheap — one canvas, one texture).
+    dmgCtx.clearRect(0, 0, 128, 64)
+    dmgCtx.font = `bold ${crit ? 44 : 36}px sans-serif`
+    dmgCtx.textAlign = 'center'
+    dmgCtx.textBaseline = 'middle'
+    dmgCtx.fillStyle = 'rgba(0,0,0,0.7)'
+    dmgCtx.fillText(text, 65, 33)
+    dmgCtx.fillStyle = crit ? '#ff4444' : '#ffdd55'
+    dmgCtx.fillText(text, 64, 32)
+    dmgTex.needsUpdate = true
+
+    const mat = new THREE.SpriteMaterial({ map: dmgTex, transparent: true, depthTest: false, depthWrite: false })
+    const sprite = new THREE.Sprite(mat)
+    sprite.position.copy(pos)
+    sprite.position.y += 0.6
+    const s = crit ? 1.4 : 1
+    sprite.scale.set(1.2 * s, 0.6 * s, 1)
+    this.scene.add(sprite)
+    this.dmgNumbers.push({
+      sprite,
+      vel: new THREE.Vector3((Math.random() - 0.5) * 1.5, 3.5, (Math.random() - 0.5) * 1.5),
+      life: 0,
+      maxLife: 0.9,
+    })
+  }
+
   update(dt: number) {
     for (let i = this.particles.length - 1; i >= 0; i--) {
       const p = this.particles[i]
@@ -307,10 +353,22 @@ export class Effects {
         this.domains.splice(i, 1)
       }
     }
+    // Damage numbers float up and fade.
+    for (let i = this.dmgNumbers.length - 1; i >= 0; i--) {
+      const d = this.dmgNumbers[i]
+      d.life += dt
+      d.vel.y -= 6 * dt
+      d.sprite.position.addScaledVector(d.vel, dt)
+      const t = d.life / d.maxLife
+      ;(d.sprite.material as THREE.SpriteMaterial).opacity = t < 0.7 ? 1 : Math.max(0, 1 - (t - 0.7) / 0.3)
+      d.sprite.scale.multiplyScalar(1 + dt * 0.3)
+      if (d.life >= d.maxLife) {
+        this.scene.remove(d.sprite)
+        ;(d.sprite.material as THREE.Material).dispose()
+        this.dmgNumbers.splice(i, 1)
+      }
+    }
   }
-
-  /**
-   * Black opaque dome + small banana environment (Domain Expansion).
    * The wall is solid for projectiles (see Game.fireDomain for the body).
    */
   domain(pos: THREE.Vector3, v2: boolean, scene: THREE.Scene, world: CANNON.World, mat: CANNON.Material) {
@@ -436,8 +494,13 @@ export class Effects {
       for (const m of d.mats) m.dispose()
       for (const g of d.geometries) g.dispose()
     }
+    for (const d of this.dmgNumbers) {
+      this.scene.remove(d.sprite)
+      ;(d.sprite.material as THREE.Material).dispose()
+    }
     this.particles = []
     this.rings = []
     this.domains = []
+    this.dmgNumbers = []
   }
 }
