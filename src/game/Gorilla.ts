@@ -144,7 +144,8 @@ export class Gorilla {
   private meshLinks: { mesh: THREE.Object3D; body: CANNON.Body; baseScale: THREE.Vector3 }[] = []
   private materials: THREE.Material[] = []
   private geometries: THREE.BufferGeometry[] = []
-  private collisionGroup: number
+  /** Public so callers (e.g. Game.fireDomain) can exclude the caster from a body's collision mask. */
+  readonly collisionGroup: number
   private collisionMask: number
   private material: CANNON.Material
   private world!: CANNON.World

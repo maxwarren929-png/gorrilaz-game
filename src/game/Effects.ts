@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import * as CANNON from 'cannon-es'
-import { DOMAIN } from './constants'
+import { DOMAIN, GROUND_GROUP } from './constants'
 
 interface Particle {
   mesh: THREE.Mesh
@@ -372,9 +372,15 @@ export class Effects {
 
   /**
    * Black opaque dome + small banana environment (Domain Expansion).
-   * The wall is solid for projectiles (see Game.fireDomain for the body).
+   * The wall is solid for both projectiles (see Game.fireDomain distance
+   * tests + Projectiles.update) and gorilla bodies.
+   *
+   * `excludeGroup`: when the LOCAL player casts, pass their collision group so
+   * the physics shell doesn't collide with the caster (who's at the sphere's
+   * center and would be ejected by the solver). For remote-cast domains, omit
+   * it so the local player IS physically blocked from walking in.
    */
-  domain(pos: THREE.Vector3, v2: boolean, scene: THREE.Scene, world: CANNON.World, mat: CANNON.Material) {
+  domain(pos: THREE.Vector3, v2: boolean, scene: THREE.Scene, world: CANNON.World, mat: CANNON.Material, excludeGroup?: number) {
     const radius = v2 ? DOMAIN.radius * 1.5 : DOMAIN.radius
     const group = new THREE.Group()
     group.position.copy(pos)
@@ -394,11 +400,15 @@ export class Effects {
     group.add(dome)
 
     // Physics shell so projectiles (and players) cannot pass through.
+    // GROUND_GROUP (1) is in every gorilla's collisionMask, so all gorillas
+    // collide with the dome wall. excludeGroup (the caster's group bit) is
+    // cleared from the mask so the caster — who stands at the sphere's center —
+    // isn't ejected by the solver's penetration correction.
     const body = new CANNON.Body({ mass: 0, material: mat })
     body.addShape(new CANNON.Sphere(radius))
     body.position.set(pos.x, pos.y, pos.z)
-    body.collisionFilterGroup = 2 // GROUND_GROUP-equivalent
-    body.collisionFilterMask = 0xffffffff
+    body.collisionFilterGroup = GROUND_GROUP
+    body.collisionFilterMask = excludeGroup != null ? 0xffffffff & ~excludeGroup : 0xffffffff
     world.addBody(body)
 
     // Banana environment: scattered bananas + a few banana plants.

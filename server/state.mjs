@@ -86,6 +86,8 @@ function publicRoom(room) {
     winner: room.winner ?? null,
     koCounter: room.koCounter,
     grabs: [...room.grabs.entries()],
+    // Parallel map for the grab auto-escape sweep (grabber id -> start ms).
+    grabStartAt: [...(room.grabStartAt?.entries() || [])],
     players: [...room.players.values()].map((p) => ({
       id: p.id,
       name: p.name,

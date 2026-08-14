@@ -432,7 +432,19 @@ export class Game {
         }
       }
       if (hit) {
-        const knock = kind === 'banana' ? BANANA.knockback : LASER.knockback
+        // Mirror punch/slam/throw: fold the attacker's forceMul + both sides'
+        // Domain Expansion buffs into the knockback. The server already scales
+        // damage this way (applyDamage + forceMul), so without this the HP bar
+        // drops correctly but the body barely moves for upgraded ranged builds.
+        const atk = net.players.get(from)
+        const am = atk ? modsFor(atk.upgrades) : null
+        const atkDomain = atk && atk.domainUntil && atk.domainUntil > Date.now() + this.net!.clockSkew ? DOMAIN.buffKnock : 1
+        const vicDomain = this.domainActive ? DOMAIN.buffResist : 1
+        const knockMul = (am ? am.forceMul : 1) * atkDomain * vicDomain
+        // Damage number mirrors server's applyDamage: dmg * forceMul * atkBuff * vicBuff.
+        const atkDmg = atk && atk.domainUntil && atk.domainUntil > Date.now() + this.net!.clockSkew ? DOMAIN.buffDamage : 1
+        const dmgMul = (am ? am.forceMul : 1) * atkDmg * vicDomain
+        const knock = (kind === 'banana' ? BANANA.knockback : LASER.knockback) * knockMul
         const up = kind === 'banana' ? BANANA.knockUp : LASER.knockUp
         if (hit === net.id) {
           this.player.applyLaunch(new CANNON.Vec3(d.x, 0, d.z), knock, up, 18, 10, 0.8)
@@ -443,7 +455,7 @@ export class Game {
         this.effects.burst(at.setY(at.y + 0.4), new THREE.Vector3(d.x, 0.4, d.z))
         if (vp) {
           vp.applyHitImpulse(d.clone().setY(0).normalize(), knock)
-          this.effects.damageNumber(vp.pos.clone(), kind === 'banana' ? DAMAGE.banana : DAMAGE.laser)
+          this.effects.damageNumber(vp.pos.clone(), (kind === 'banana' ? DAMAGE.banana : DAMAGE.laser) * dmgMul)
         }
       }
     }
@@ -654,12 +666,15 @@ export class Game {
     this.projectiles.fireBeam(origin, dir, Math.max(0.4, length), this.player.mods.laser_v2)
     this.cameraRig.addShake(hit ? 0.28 : 0.16)
     if (hit?.id.startsWith('dummy:')) this.hitDummyRanged(hit.id, dir, 'laser')
-    // Visual knockback prediction on remote players hit by our laser
+    // Visual knockback prediction on remote players hit by our laser.
+    // Scale by our own forceMul (Feather/Big/Tiny) and active domain buff so
+    // the prediction matches what the server will actually apply.
     if (hit && !hit.id.startsWith('dummy:')) {
       const av = this.remotes.get(hit.id)
       if (av) {
-        av.applyHitImpulse(dir.clone().setY(0).normalize(), LASER.knockback)
-        this.effects.damageNumber(av.pos.clone(), DAMAGE.laser * this.domainBuff())
+        const knockMul = this.player.mods.forceMul * this.domainBuff()
+        av.applyHitImpulse(dir.clone().setY(0).normalize(), LASER.knockback * knockMul)
+        this.effects.damageNumber(av.pos.clone(), DAMAGE.laser * this.player.mods.forceMul * this.domainBuff())
       }
     }
     this.net?.send({
@@ -685,7 +700,7 @@ export class Game {
       10,
       0.8
     )
-    const dmg = (kind === 'banana' ? DAMAGE.banana : DAMAGE.laser) * this.domainBuff()
+    const dmg = (kind === 'banana' ? DAMAGE.banana : DAMAGE.laser) * this.player.mods.forceMul * this.domainBuff()
     const dp = dummy.torso.position
     this.effects.damageNumber(new THREE.Vector3(dp.x, dp.y + 0.8, dp.z), dmg)
   }
@@ -696,7 +711,9 @@ export class Game {
     this.domainActive = true
     const v2 = this.player.mods.domain_v2
     const pos = new THREE.Vector3(this.player.torso.position.x, this.player.torso.position.y, this.player.torso.position.z)
-    this.effects.domain(pos, v2, this.scene, this.world, this.materialGround)
+    // Exclude the caster from the physics shell's collision mask — the caster
+    // is at the sphere's center and would be ejected by the penetration solver.
+    this.effects.domain(pos, v2, this.scene, this.world, this.materialGround, this.player.collisionGroup)
     this.cameraRig.addShake(1.5)
     this.net?.send({ type: 'trigger', kind: 'domain' })
 
@@ -1601,11 +1618,14 @@ export class Game {
         if (id.startsWith('dummy:')) this.hitDummyRanged(id, dir, 'banana')
         else if (key) {
           this.net?.send({ type: 'ranged', kind: 'banana', impact: key, target: id })
-          // Immediate visual feedback (server excludes us from the echo)
+          // Immediate visual feedback (server excludes us from the echo).
+          // Scale prediction by our own forceMul + domain so it matches the
+          // server's actual damage/knockback application.
           const av = this.remotes.get(id)
           if (av) {
-            av.applyHitImpulse(dir.clone().setY(0).normalize(), BANANA.knockback)
-            this.effects.damageNumber(av.pos.clone(), DAMAGE.banana)
+            const knockMul = this.player.mods.forceMul * this.domainBuff()
+            av.applyHitImpulse(dir.clone().setY(0).normalize(), BANANA.knockback * knockMul)
+            this.effects.damageNumber(av.pos.clone(), DAMAGE.banana * this.player.mods.forceMul * this.domainBuff())
           }
         }
       },

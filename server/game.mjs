@@ -10,6 +10,13 @@ import { randomUUID } from 'crypto'
 
 const MAX = 8
 const PUNCH_RANGE = 3.6
+// The client's punch hit-test measures from the SWINGING ARM position
+// (Gorilla.ts drivePunchArm drives the active arm ~armReach=1.48 units ahead
+// of the torso during the swing), not the torso. The server's torso-to-torso
+// check had no concept of the extended arm, so visually-connected swings were
+// routinely rejected. Fold in armReach (scaled with body size, like PUNCH_RANGE)
+// so the server's reach mirrors what the client registered.
+const PUNCH_ARM_REACH = 1.5 // mirrors src/game/constants.ts PUNCH.armReach
 const GRAB_RANGE = 3.4
 // Server-side ranged tolerance: at least the longest-range projectile's full
 // travel distance (banana speed*life ≈ 75) so legit long-range hits register.
@@ -20,6 +27,14 @@ const BANANA_COOLDOWN = 700 // mirrors BANANA.cooldown
 const LASER_COOLDOWN = 80
 const OFFLINE_GRACE_MS = 25_000
 const IDLE_ROOM_S = 45
+// A grabbed player auto-breaks free after this long, matching the dummy
+// escape window (src/game/constants.ts GRAB.escapeTime). Without it a troll
+// or AFK grabber can lock a player out of the round for the full 150s.
+const GRAB_ESCAPE_MS = 3200
+// Void KO is only authoritative when the player's last pose was below this
+// line. Mirrors src/game/constants.ts RESPAWN.fallY. Prevents a bogus `void`
+// packet from denying an attacker their KO credit.
+const VOID_Y = -4
 
 // Mirrors src/game/constants.ts — keep in sync on tuning changes.
 const MAX_HP = 100
@@ -263,6 +278,7 @@ export function createEngine(store, { instanceId }) {
 
   function beginCountdown(room) {
     room.grabs.clear()
+    room.grabStartAt.clear()
     room.koCounter = 0
     for (const p of room.players.values()) {
       p.hp = maxHp(p)
@@ -299,6 +315,11 @@ export function createEngine(store, { instanceId }) {
       code,
       players: new Map(),
       grabs: new Map(data.grabs || []),
+      // Restore grab start times so the auto-escape sweep continues to work
+      // across a rejoin/hydrate. Fall back to "now" for any active grab whose
+      // timestamp didn't round-trip (worst case: the victim waits slightly
+      // longer on this instance, but the owning instance still releases).
+      grabStartAt: new Map((data.grabStartAt || []).map(([k, v]) => [k, v || Date.now()])),
       phase: data.phase || 'lobby',
       endsAt: data.endsAt || 0,
       winner: data.winner ?? null,
@@ -314,7 +335,10 @@ export function createEngine(store, { instanceId }) {
         room, // back-reference so markGone/finalizeLeave find the room after a rejoin
         ws: null,
         pose: null,
-        lastHit: 0,
+        // Per-target last punch timestamp so a single swing can cleave multiple
+        // victims. Gate is per (attacker,target) pair, not global. The client
+        // already predicts/predicts multi-target via Gorilla.hitSet.
+        lastHit: new Map(),
         lastRanged: 0,
         lastMsgAt: 0,
         spawned: new Map(),
@@ -359,6 +383,7 @@ export function createEngine(store, { instanceId }) {
       p.offer = null
     }
     room.grabs.clear()
+    room.grabStartAt.clear()
     room.winner = null
     setPhase(room, 'lobby', 0)
     room.endsAt = 0
@@ -417,7 +442,7 @@ export function createEngine(store, { instanceId }) {
       tint: TINTS[0],
       room: null,
       pose: null,
-      lastHit: 0,
+      lastHit: new Map(), // per-target punch cooldown (cleave allowed)
       lastRanged: 0,
       lastMsgAt: Date.now(),
       spawned: new Map(), // banana spawnId -> expiresAt
@@ -468,6 +493,10 @@ export function createEngine(store, { instanceId }) {
           code: newCode(),
           players: new Map(),
           grabs: new Map(),
+          // Parallel map: grabber id -> grab-start timestamp (ms). Drives the
+          // auto-escape sweep in the global tick. Kept separate from grabs so
+          // the grabs shape (and its wire serialization) stays unchanged.
+          grabStartAt: new Map(),
           phase: 'lobby',
           endsAt: 0,
           winner: null,
@@ -578,13 +607,19 @@ export function createEngine(store, { instanceId }) {
       case 'punch': {
         if (player.ko || room.phase !== 'active') return
         const now = Date.now()
-        if (now - player.lastHit < HIT_COOLDOWN) return
+        // Per-target punch cooldown so a single swing can cleave multiple
+        // victims in range (matches the client's Gorilla.hitSet loop, which
+        // sends one punch intent per enemy hit). The previous global scalar
+        // gate accepted only the first target per swing.
+        if (now - (player.lastHit.get(msg.target) || 0) < HIT_COOLDOWN) return
         const t = room.players.get(msg.target)
         if (!t || t === player || t.ko) return
         // +1.5 tolerance: client sees remotes 90ms in the past, so the
         // positions the client used to decide "in range" are slightly stale.
-        if (dist(player.pose, t.pose) > PUNCH_RANGE * bodyScale(player) + 0.7 * bodyScale(t) + 1.5) return
-        player.lastHit = now
+        // PUNCH_ARM_REACH accounts for the swinging arm being ~1.5 units ahead
+        // of the torso during a punch (client hit-tests from arm position).
+        if (dist(player.pose, t.pose) > (PUNCH_RANGE + PUNCH_ARM_REACH) * bodyScale(player) + 0.7 * bodyScale(t) + 1.5) return
+        player.lastHit.set(t.id, now)
         emitAll(room, () => ({ type: 'punched', from: player.id, to: t.id, dir: msg.dir }), player.id)
         applyDamage(room, t, DMG.punch, player)
         return
@@ -598,6 +633,7 @@ export function createEngine(store, { instanceId }) {
         // +1.5 tolerance: same interpolation lag rationale as punch.
         if (dist(player.pose, t.pose) > GRAB_RANGE * bodyScale(player) + 0.7 * bodyScale(t) + 1.5) return
         room.grabs.set(player.id, t.id)
+        room.grabStartAt.set(player.id, Date.now())
         emitAll(room, () => ({ type: 'grabbed', from: player.id, to: t.id }))
         return
       }
@@ -679,7 +715,11 @@ export function createEngine(store, { instanceId }) {
         applyDamage(room, player, Math.min(msg.amount, FALL_MAX_DAMAGE), null)
         return
       case 'void':
-        if (room.phase === 'active') knockOut(room, player, null)
+        // Cross-check the player's last-reported pose: only accept a void KO
+        // when the player was actually below the void line. Without this, a
+        // player about to be KO'd could send a bogus `void` to deny the
+        // attacker the kos/dealt credit (knockOut with attacker=null).
+        if (room.phase === 'active' && player.pose && player.pose.p[1] < VOID_Y) knockOut(room, player, null)
         return
       case 'trigger': {
         // F-key ability: Domain Expansion. Buff the caster for its duration.
@@ -751,7 +791,7 @@ export function createEngine(store, { instanceId }) {
           room,
           ws: null,
           pose: null,
-          lastHit: 0,
+          lastHit: new Map(), // per-target punch cooldown (cleave allowed)
           lastRanged: 0,
           lastMsgAt: 0,
           spawned: new Map(),
@@ -791,6 +831,13 @@ export function createEngine(store, { instanceId }) {
     room.phase = shared.phase
     room.endsAt = shared.endsAt || room.endsAt
     room.grabs = new Map(shared.grabs || [])
+    // Mirror grab start times for the auto-escape sweep. For any active grab
+    // without a round-tripped timestamp, default to now so the sweep still
+    // fires (worst case: slightly longer hold on this non-owning instance;
+    // the owning instance's released broadcast is authoritative).
+    room.grabStartAt = new Map(
+      (shared.grabStartAt || []).map(([k, v]) => [k, v || Date.now()])
+    )
   }
 
   function applyShareEvent(room, msg) {
@@ -827,11 +874,13 @@ export function createEngine(store, { instanceId }) {
       }
       case 'grabbed':
         room.grabs.set(msg.from, msg.to)
+        room.grabStartAt?.set(msg.from, Date.now())
         return
       case 'released':
       case 'slammed':
       case 'thrown':
         room.grabs.delete(msg.from)
+        room.grabStartAt?.delete(msg.from)
         return
     }
   }
@@ -873,6 +922,28 @@ export function createEngine(store, { instanceId }) {
         else if (room.phase === 'countdown') setPhase(room, 'active', ROUND.duration)
         else if (room.phase === 'active') endRound(room)
       }
+
+      // Grab auto-escape: a held player breaks free after GRAB_ESCAPE_MS,
+      // matching the dummy escape window. Without this a troll/AFK grabber can
+      // lock a victim out of the round for the full 150s. Only active during
+      // a live round (the round-reset paths already clear all grabs).
+      if (room.phase === 'active' && room.grabStartAt.size) {
+        for (const [from, startedAt] of [...room.grabStartAt.entries()]) {
+          // Orphan: the grab was cleared by another path but the start entry
+          // wasn't swept. Just drop it — no action needed.
+          if (!room.grabs.has(from)) {
+            room.grabStartAt.delete(from)
+            continue
+          }
+          if (now - startedAt >= GRAB_ESCAPE_MS) {
+            const to = room.grabs.get(from)
+            room.grabs.delete(from)
+            room.grabStartAt.delete(from)
+            broadcast(room, { type: 'released', from, to })
+          }
+        }
+      }
+
       if (store.shared) void store.heartbeatInstance(room.code, instanceId).catch(() => {})
     }
     if (store.shared && rooms.size) void pollShared().catch(() => {})
