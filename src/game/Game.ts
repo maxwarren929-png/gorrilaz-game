@@ -651,6 +651,14 @@ export class Game {
     this.projectiles.fireBeam(origin, dir, Math.max(0.4, length), this.player.mods.laser_v2)
     this.cameraRig.addShake(hit ? 0.28 : 0.16)
     if (hit?.id.startsWith('dummy:')) this.hitDummyRanged(hit.id, dir, 'laser')
+    // Visual knockback prediction on remote players hit by our laser
+    if (hit && !hit.id.startsWith('dummy:')) {
+      const av = this.remotes.get(hit.id)
+      if (av) {
+        av.applyHitImpulse(dir.clone().setY(0).normalize(), LASER.knockback)
+        this.effects.damageNumber(av.pos.clone(), DAMAGE.laser * this.domainBuff())
+      }
+    }
     this.net?.send({
       type: 'ranged',
       kind: 'laser',
@@ -836,6 +844,12 @@ export class Game {
         this.net.send({ type: 'punch', target: id, dir: [dir.x, dir.y, dir.z] })
         this.effects.burst(new THREE.Vector3(av.pos.x, av.pos.y + 0.5, av.pos.z), new THREE.Vector3(dir.x, 0.4, dir.z))
         this.cameraRig.addShake(0.4)
+        // Immediate visual knockback — the server excludes us from the
+        // punched broadcast, so without this the remote wouldn't react on
+        // our screen until the victim's real poses arrive ~200 ms later.
+        const mul = this.player.mods.forceMul * this.player.mods.punchKnockMul * this.domainBuff()
+        av.applyHitImpulse(new THREE.Vector3(dir.x, 0, dir.z), PUNCH.knockback * mul)
+        this.effects.damageNumber(av.pos.clone(), DAMAGE.punch * this.domainBuff())
       }
     }
   }
@@ -996,6 +1010,14 @@ export class Game {
       if (len > 1e-3) slamDir.scale(1 / len, slamDir)
       this.net.send({ type: 'slam', dir: [slamDir.x, slamDir.y, slamDir.z] })
       this.player.torso.applyImpulse(new CANNON.Vec3(-pf.x * 12, 4, -pf.z * 12))
+      // Visual knockback prediction on the held remote (server excludes us).
+      const mul = this.player.mods.forceMul * this.domainBuff()
+      const f3 = new THREE.Vector3(slamDir.x, slamDir.y, slamDir.z)
+      const victimPos = this.heldRemote.pos.clone()
+      this.heldRemote.applyHitImpulse(f3, GRAB.slamForce * mul)
+      this.effects.slam(victimPos)
+      this.effects.damageNumber(victimPos, DAMAGE.slam, true)
+      this.cameraRig.addShake(0.85)
       this.releaseGrab()
       return
     }
@@ -1042,6 +1064,29 @@ export class Game {
   }
 
   private performThrow(charge01: number) {
+    // Remote player throw: send to server + visual prediction (no local physics).
+    if (this.heldRemote && this.net) {
+      const pf = this.player.facing
+      const h = Math.hypot(pf.x, pf.z) || 1
+      const hx = pf.x / h
+      const hz = pf.z / h
+      const dir: [number, number, number] = [hx, 0, hz]
+      this.net.send({ type: 'throw', dir, charge: charge01 })
+      const base = THROW.minForce + (THROW.maxForce - THROW.minForce) * charge01
+      const force = base * this.player.mods.forceMul
+      const victimPos = this.heldRemote.pos.clone()
+      this.heldRemote.applyHitImpulse(new THREE.Vector3(hx, 0.6, hz), force)
+      this.effects.throw(victimPos, new THREE.Vector3(hx, 0, hz))
+      this.effects.damageNumber(victimPos, DAMAGE.throwBase + DAMAGE.throwCharged * charge01, true)
+      this.player.torso.applyImpulse(
+        new CANNON.Vec3(-pf.x * 18 * (0.5 + charge01), 3, -pf.z * 18 * (0.5 + charge01))
+      )
+      this.throws++
+      this.cameraRig.addShake(0.6 + charge01 * 0.5)
+      this.releaseGrab()
+      return
+    }
+
     const target = this.player.grabbedTarget
     if (!target) return
 
@@ -1293,16 +1338,18 @@ export class Game {
     if (this.player.ko) {
       this.chargingThrow = false
       this.throwCharge = 0
-    } else if (this.player.grabbedTarget !== null) {
+    } else if (this.player.grabbedTarget !== null || this.heldRemote) {
       if (!this.chargingThrow && throwPressed) {
         this.chargingThrow = true
         this.throwCharge = 0
       }
       if (this.chargingThrow) {
         this.throwCharge = Math.min(1, this.throwCharge + dt / THROW.chargeTime)
-        // Windup: tug the held gorilla back and up
-        const pf = this.player.facing
-        this.player.grabbedTarget.torso.applyForce(new CANNON.Vec3(-pf.x * 42, 26, -pf.z * 42))
+        if (this.player.grabbedTarget) {
+          // Windup: tug the held gorilla back and up
+          const pf = this.player.facing
+          this.player.grabbedTarget.torso.applyForce(new CANNON.Vec3(-pf.x * 42, 26, -pf.z * 42))
+        }
         this.cameraRig.addShake(0.04)
       }
       if (this.chargingThrow && throwReleased) {
@@ -1534,7 +1581,15 @@ export class Game {
         this.effects.burst(at, new THREE.Vector3(dir.x, 0.4, dir.z))
         this.cameraRig.addShake(0.25)
         if (id.startsWith('dummy:')) this.hitDummyRanged(id, dir, 'banana')
-        else if (key) this.net?.send({ type: 'ranged', kind: 'banana', impact: key, target: id })
+        else if (key) {
+          this.net?.send({ type: 'ranged', kind: 'banana', impact: key, target: id })
+          // Immediate visual feedback (server excludes us from the echo)
+          const av = this.remotes.get(id)
+          if (av) {
+            av.applyHitImpulse(dir.clone().setY(0).normalize(), BANANA.knockback)
+            this.effects.damageNumber(av.pos.clone(), DAMAGE.banana)
+          }
+        }
       },
       this.effects.domainWalls()
     )
