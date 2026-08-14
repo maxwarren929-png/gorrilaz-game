@@ -125,19 +125,20 @@ export class RemoteAvatar {
     this.group.add(this.struggle)
     this.group.add(makeLabel(name))
 
-    // Small floating health pip above the head.
+    // Floating health bar above the head — sized to be readable at combat range.
     this.hpBar = new THREE.Group()
     const back = new THREE.Mesh(
-      new THREE.PlaneGeometry(1.1, 0.13),
-      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.55, depthWrite: false })
+      new THREE.PlaneGeometry(1.6, 0.2),
+      new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.65, depthWrite: false, depthTest: false })
     )
     this.hpFill = new THREE.Mesh(
-      new THREE.PlaneGeometry(1.06, 0.09),
-      new THREE.MeshBasicMaterial({ color: 0x6ee7a0, depthWrite: false })
+      new THREE.PlaneGeometry(1.52, 0.14),
+      new THREE.MeshBasicMaterial({ color: 0x6ee7a0, depthWrite: false, depthTest: false })
     )
     this.hpFill.position.z = 0.001
     this.hpBar.add(back, this.hpFill)
     this.hpBar.position.set(0, 1.18, 0)
+    this.hpBar.renderOrder = 999
     this.group.add(this.hpBar)
   }
 
@@ -147,7 +148,7 @@ export class RemoteAvatar {
     this.hp = Math.max(0, Math.min(this.maxHp, hp))
     const f = this.hp / this.maxHp
     this.hpFill.scale.x = Math.max(0.001, f)
-    this.hpFill.position.x = -(1.06 * (1 - f)) / 2
+    this.hpFill.position.x = -(1.52 * (1 - f)) / 2
     const mat = this.hpFill.material as THREE.MeshBasicMaterial
     mat.color.setHex(f > 0.55 ? 0x6ee7a0 : f > 0.25 ? 0xffcc55 : 0xff5566)
   }

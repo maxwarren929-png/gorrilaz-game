@@ -170,7 +170,7 @@ export default function App() {
             <div className="border-l-2 border-amber-300 pl-3">
               <h1 className="text-2xl font-black uppercase tracking-[0.2em]">Gorilla FFA</h1>
               <p className="mt-1 text-[10px] font-bold uppercase tracking-[0.32em] text-amber-300/90">
-                Phase 5 / Rounds &amp; Upgrades
+                Online Brawler
               </p>
             </div>
             <p className="mt-4 text-sm text-white/60">
@@ -190,6 +190,25 @@ export default function App() {
             >
               Practice Solo
             </button>
+            {/* Rounds-to-win selector */}
+            <label className="mt-5 block text-[10px] font-bold uppercase tracking-[0.2em] text-white/45">
+              Rounds to Win
+            </label>
+            <div className="mt-1 flex gap-2">
+              {[1, 3, 5, 10].map((n) => (
+                <button
+                  key={n}
+                  className={`flex-1 border py-2 text-sm font-bold transition ${
+                    matchTarget === n
+                      ? 'border-amber-300 bg-amber-300/15 text-amber-200'
+                      : 'border-white/20 text-white/60 hover:border-white/40'
+                  }`}
+                  onClick={() => setMatchTarget(n)}
+                >
+                  {n === 1 ? 'Quick' : `${n}`}
+                </button>
+              ))}
+            </div>
             <div className="mt-5 grid grid-cols-2 gap-3">
               <button
                 className="border border-white/20 py-2 text-[11px] font-bold uppercase tracking-[0.16em] hover:border-white/50"
@@ -292,6 +311,11 @@ export default function App() {
           {/* Scoreboard */}
           {online && (
             <div className="pointer-events-none absolute right-5 top-24 w-56 border border-white/10 bg-black/45 p-2 text-[10px] backdrop-blur-sm">
+              {matchTarget > 1 && (
+                <div className="mb-1 border-b border-white/10 pb-1 text-center text-[9px] font-bold uppercase tracking-[0.2em] text-amber-300/70">
+                  First to {matchTarget} wins
+                </div>
+              )}
               {players
                 .slice()
                 .sort((a, b) => b.wins - a.wins || b.dealt - a.dealt)
@@ -353,8 +377,36 @@ export default function App() {
           )}
 
           {/* Round banners */}
-          {online && phase === 'lobby' && (
-            <Banner title="Waiting for apes" detail={`Ready up — needs 2+ players (${players.filter((p) => p.ready).length}/${players.length} ready)`} />
+          {online && phase === 'lobby' && !matchWinner && (
+            <div className="pointer-events-none absolute left-1/2 top-1/4 w-[min(90vw,520px)] -translate-x-1/2 text-center drop-shadow-[0_2px_10px_rgba(0,0,0,0.9)]">
+              <div className="border-y border-amber-300/60 bg-black/55 py-4">
+                <div className="text-base font-black uppercase tracking-[0.2em] text-amber-200">
+                  Room {stats.room} — First to {matchTarget} wins
+                </div>
+                <div className="mt-2 text-[11px] font-bold uppercase tracking-[0.14em] text-white/65">
+                  {players.filter((p) => p.ready).length}/{players.length} ready · Needs 2+ to start
+                </div>
+                <div className="mt-3 flex flex-wrap justify-center gap-1.5">
+                  {players.map((p) => (
+                    <span
+                      key={p.id}
+                      className={`flex items-center gap-1 border px-2 py-0.5 text-[10px] ${
+                        p.ready
+                          ? 'border-emerald-300/50 text-emerald-200'
+                          : 'border-white/20 text-white/60'
+                      }`}
+                    >
+                      <span
+                        className="inline-block h-2 w-2 rounded-full"
+                        style={{ background: `#${(p.tint ?? 0x888888).toString(16).padStart(6, '0')}` }}
+                      />
+                      {p.name}
+                      {p.ready ? ' ✓' : ''}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
           )}
           {online && phase === 'countdown' && <Banner title={`Round starts in ${secs}`} detail="Get to high ground" />}
           {online && phase === 'ended' && (
@@ -434,6 +486,41 @@ export default function App() {
                       </button>
                     )
                   })}
+                </div>
+              </div>
+            </section>
+          )}
+
+          {/* Match-end overlay */}
+          {online && matchWinner && (
+            <section className="absolute inset-0 z-30 flex items-center justify-center bg-black/80 p-6 backdrop-blur-sm">
+              <div className="w-full max-w-md border border-amber-300/50 bg-black/70 p-6 text-center">
+                <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-amber-300/80">Match Over</p>
+                <h2 className="mt-2 text-2xl font-black uppercase tracking-[0.16em] text-amber-200">
+                  {players.find((p) => p.id === matchWinner)?.name ?? 'Someone'} Wins!
+                </h2>
+                <p className="mt-1 text-xs text-white/55">First to {matchTarget} — returning to lobby…</p>
+                <div className="mt-5 space-y-1">
+                  {matchStandings
+                    .slice()
+                    .sort((a, b) => b.wins - a.wins || b.kos - a.kos)
+                    .map((s, i) => (
+                      <div
+                        key={s.id}
+                        className={`flex items-center justify-between border-b border-white/10 py-1.5 text-sm ${
+                          s.id === myId ? 'text-amber-200' : 'text-white/70'
+                        }`}
+                      >
+                        <span>
+                          {i + 1}. {players.find((p) => p.id === s.id)?.name ?? '?'}
+                        </span>
+                        <span className="flex gap-3 text-xs tabular-nums text-white/50">
+                          <span className="text-amber-300">{s.wins}W</span>
+                          <span>{s.kos}KO</span>
+                          <span>{Math.round(s.dealt)}dmg</span>
+                        </span>
+                      </div>
+                    ))}
                 </div>
               </div>
             </section>
