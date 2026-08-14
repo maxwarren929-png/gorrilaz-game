@@ -58,8 +58,9 @@ export class RemoteAvatar {
   private snaps: Snap[] = []
   private struggle: THREE.Group
   // Client-side knockback prediction: when we see a remote get hit, apply a
-  // visual velocity offset that decays over ~0.4 s. Without this, the avatar
+  // visual displacement that decays over ~0.4 s. Without this, the avatar
   // appears frozen until the victim's real pose updates arrive (~200 ms).
+  private hitOffset = new THREE.Vector3()
   private hitVel = new THREE.Vector3()
   private hitTime = 0
 
@@ -189,24 +190,34 @@ export class RemoteAvatar {
    * stale pre-reset pose can't bleed into the next round's interpolation. */
   clearSnaps() {
     this.snaps.length = 0
+    this.hitOffset.set(0, 0, 0)
     this.hitVel.set(0, 0, 0)
     this.hitTime = 0
   }
 
-  /** Visual knockback prediction: apply an immediate velocity offset in the
+  /** Visual knockback prediction: apply an immediate displacement in the
    * hit direction so the avatar reacts on the attacker's screen before the
-   * victim's real pose updates arrive over the network. */
+   * victim's real pose updates arrive over the network. Uses a separate
+   * offset vector that accumulates over frames — NOT in this.pos which is
+   * overwritten by lerpVectors() every frame. */
   applyHitImpulse(dir: THREE.Vector3, force: number) {
-    const scale = force / 86 // normalised to a baseline punch
-    this.hitVel.addScaledVector(dir, scale * 4)
-    this.hitVel.y += scale * 1.5 // pop up slightly
-    this.hitTime = performance.now() / 1000
+    // Scale: a baseline punch (force ~86) should shove the avatar ~2 units.
+    // We set a velocity that decays over ~0.4s, so total displacement ≈ vel * 0.2.
+    const power = Math.min(force / 86, 5) // clamp so slams/throws don't launch to orbit
+    this.hitVel.x += dir.x * power * 12
+    this.hitVel.y += power * 6 // pop up
+    this.hitVel.z += (dir.z || 0) * power * 12
+    if (this.hitTime === 0) this.hitTime = performance.now() / 1000
   }
 
   /** Pin this avatar in front of a local grabber so the hold reads instantly. */
   holdAt(x: number, y: number, z: number, fx: number, fz: number, distance: number) {
     this.heldLock = true
     this.pos.set(x + fx * distance, y, z + fz * distance)
+    // Clear knockback offset while held
+    this.hitOffset.set(0, 0, 0)
+    this.hitVel.set(0, 0, 0)
+    this.hitTime = 0
     this.parts[0].position.copy(this.pos)
     this.struggle.visible = true
     this.struggle.rotation.y += 0.12
@@ -234,20 +245,29 @@ export class RemoteAvatar {
     const span = Math.max(1e-4, b.t - a.t)
     const u = Math.max(0, Math.min(1, (renderT - a.t) / span))
     this.pos.lerpVectors(a.p, b.p, u)
-    // Apply decaying visual knockback offset. Converges to zero as real
-    // snapshots catch up, so there's no permanent desync.
+    // Apply accumulated visual knockback offset. This is a SEPARATE vector
+    // from this.pos so lerpVectors() doesn't wipe it every frame. The offset
+    // decays exponentially and converges to zero as real snapshots catch up.
     if (this.hitTime > 0) {
       const nowSec = performance.now() / 1000
       const elapsed = nowSec - this.hitTime
-      if (elapsed < 0.45) {
+      if (elapsed < 0.5) {
         const dt = 1 / 60
-        this.hitVel.y -= 20 * dt // gravity on the offset
-        this.hitVel.multiplyScalar(0.94) // drag
-        this.pos.addScaledVector(this.hitVel, dt)
+        this.hitVel.y -= 30 * dt // gravity on the offset
+        this.hitVel.multiplyScalar(0.92) // drag
+        this.hitOffset.addScaledVector(this.hitVel, dt)
+        // Clamp so the offset can't drift more than 5 units from reality
+        if (this.hitOffset.length() > 5) this.hitOffset.setLength(5)
       } else {
-        this.hitVel.set(0, 0, 0)
-        this.hitTime = 0
+        // Fade the offset back to zero over 0.2s so it doesn't snap
+        this.hitOffset.multiplyScalar(0.85)
+        if (this.hitOffset.length() < 0.01) {
+          this.hitOffset.set(0, 0, 0)
+          this.hitVel.set(0, 0, 0)
+          this.hitTime = 0
+        }
       }
+      this.pos.add(this.hitOffset)
     }
     this.parts[0].position.copy(this.pos)
     this.parts[0].quaternion.slerpQuaternions(a.q, b.q, u)

@@ -581,7 +581,9 @@ export function createEngine(store, { instanceId }) {
         if (now - player.lastHit < HIT_COOLDOWN) return
         const t = room.players.get(msg.target)
         if (!t || t === player || t.ko) return
-        if (dist(player.pose, t.pose) > PUNCH_RANGE * bodyScale(player) + 0.7 * bodyScale(t)) return
+        // +1.5 tolerance: client sees remotes 90ms in the past, so the
+        // positions the client used to decide "in range" are slightly stale.
+        if (dist(player.pose, t.pose) > PUNCH_RANGE * bodyScale(player) + 0.7 * bodyScale(t) + 1.5) return
         player.lastHit = now
         emitAll(room, () => ({ type: 'punched', from: player.id, to: t.id, dir: msg.dir }), player.id)
         applyDamage(room, t, DMG.punch, player)
@@ -593,7 +595,8 @@ export function createEngine(store, { instanceId }) {
         if (!t || t === player || t.ko) return
         if (room.grabs.has(player.id)) return
         for (const to of room.grabs.values()) if (to === t.id) return
-        if (dist(player.pose, t.pose) > GRAB_RANGE * bodyScale(player) + 0.7 * bodyScale(t)) return
+        // +1.5 tolerance: same interpolation lag rationale as punch.
+        if (dist(player.pose, t.pose) > GRAB_RANGE * bodyScale(player) + 0.7 * bodyScale(t) + 1.5) return
         room.grabs.set(player.id, t.id)
         emitAll(room, () => ({ type: 'grabbed', from: player.id, to: t.id }))
         return

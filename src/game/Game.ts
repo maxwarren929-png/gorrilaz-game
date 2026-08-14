@@ -101,6 +101,7 @@ export class Game {
   private net: NetClient | null = null
   private remotes = new Map<string, RemoteAvatar>()
   private heldRemote: RemoteAvatar | null = null
+  private grabConfirmTimer = 0
   private heldById: string | null = null
   private poseAcc = 0
   // ---- Phase 5 ----
@@ -350,6 +351,8 @@ export class Game {
           this.heldRemote = r
           r.heldLock = true
         }
+        // Server confirmed our grab — cancel the rollback timeout
+        this.grabConfirmTimer = 0
       }
       const vic = this.remotes.get(to)
       if (vic) this.effects.grab(vic.pos.clone())
@@ -921,6 +924,10 @@ export class Game {
         this.net.send({ type: 'grab', target: best.id })
         this.effects.grab(best.pos.clone())
         this.cameraRig.addShake(0.3)
+        // Server confirmation timeout: if the server hasn't confirmed the grab
+        // within 300ms (rejected due to range/pose desync), roll back so the
+        // player doesn't think they're holding someone who's actually free.
+        this.grabConfirmTimer = 0.3
         return true
       }
     }
@@ -1415,6 +1422,17 @@ export class Game {
     this.domainCd = Math.max(0, this.domainCd - dt)
     this.domainTimer = Math.max(0, this.domainTimer - dt)
     this.domainActive = this.domainTimer > 0
+
+    // Grab confirmation timeout: if the server didn't confirm within the
+    // window, the grab was rejected (range/pose desync). Roll back so the
+    // player doesn't think they're holding someone who's actually free.
+    if (this.grabConfirmTimer > 0) {
+      this.grabConfirmTimer -= dt
+      if (this.grabConfirmTimer <= 0 && this.heldRemote && !this.player.grabbedTarget) {
+        this.heldRemote.heldLock = false
+        this.heldRemote = null
+      }
+    }
 
     if (this.player.laserInterrupt > 0 && this.input.punchHeld) this.laserNeedsRelease = true
     if (!this.input.punchHeld) this.laserNeedsRelease = false
